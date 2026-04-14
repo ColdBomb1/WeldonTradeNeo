@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% set active_page = "signals" %}
+
+{% block title %}Signals — WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Trade Signals</h1>
+  <p>{% if signals_enabled %}Auto-scanning enabled (every {{ scan_interval }}s){% else %}Auto-scanning disabled{% endif %}
+  {% if active_rulesets %} | Active rule sets: {{ active_rulesets }}{% endif %}</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Controls</h2>
+    <div class="toolbar">
+      <label>
+        Symbol
+        <select id="filter-symbol">
+          <option value="">All</option>
+          {% for s in symbols %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Status
+        <select id="filter-status">
+          <option value="">All</option>
+          <option value="confirmed">Confirmed</option>
+          <option value="executed">Executed</option>
+          <option value="rejected">Rejected</option>
+          <option value="pending">Pending</option>
+        </select>
+      </label>
+      <div class="button-wrap">
+        <button type="button" id="refresh-btn">Refresh</button>
+        <button type="button" id="scan-now-btn">Scan Now</button>
+        <button type="button" id="clear-btn" style="background:#888">Clear Old</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Signals</h2>
+    <table class="table" id="signals-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Time</th>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Price</th>
+          <th>SL</th>
+          <th>TP</th>
+          <th>Confidence</th>
+          <th>Source</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="11" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="detail-section" style="display:none">
+    <h2 id="detail-title">Signal Detail</h2>
+    <div class="status-grid" id="detail-grid"></div>
+    <h3>Claude's Reasoning</h3>
+    <div id="detail-reasoning" style="white-space:pre-wrap;font-size:13px;background:#f5f0e6;padding:12px;border-radius:6px;max-height:300px;overflow-y:auto"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function statusBadge(status) {
+    const colors = { pending: '#e67e22', confirmed: '#27ae60', rejected: '#e74c3c', executed: '#1f4b57', expired: '#888' };
+    const color = colors[status] || '#888';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#fff;font-size:12px">${status}</span>`;
+  }
+
+  function sideBadge(side) {
+    const color = side === 'buy' ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${color}">${side.toUpperCase()}</span>`;
+  }
+
+  function confBadge(conf) {
+    if (conf == null) return '--';
+    const pct = (conf * 100).toFixed(0);
+    const color = conf >= 0.7 ? '#27ae60' : conf >= 0.55 ? '#e67e22' : '#e74c3c';
+    return `<span style="font-weight:600;color:${color}">${pct}%</span>`;
+  }
+
+  function sourceName(strategy_type) {
+    if (strategy_type && strategy_type.startsWith('ruleset_')) {
+      return `<span style="color:#1f4b57;font-weight:600">Rule Set</span>`;
+    }
+    return `<span style="color:#888">${strategy_type || '?'}</span>`;
+  }
+
+  async function loadSignals() {
+    const symbol = document.getElementById('filter-symbol').value;
+    const status = document.getElementById('filter-status').value;
+    let url = '/api/signals?limit=100';
+    if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+    if (status) url += `&status=${encodeURIComponent(status)}`;
+
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const tbody = document.querySelector('#signals-table tbody');
+    tbody.innerHTML = '';
+
+    if (!data.signals || !data.signals.length) {
+      tbody.innerHTML = '<tr><td colspan="11" class="small">No signals yet. Enable signal scanning in Settings and ensure a Rule Set is active.</td></tr>';
+      return;
+    }
+
+    data.signals.forEach(s => {
+      const row = document.createElement('tr');
+      row.style.cursor = 'pointer';
+      const time = s.created_at ? new Date(s.created_at).toLocaleString() : '--';
+      let actions = '';
+      if (s.status === 'pending' || s.status === 'confirmed') {
+        actions = `<button onclick="event.stopPropagation();executeSignal(${s.id})" style="margin-right:4px">Execute</button>`;
+        actions += `<button onclick="event.stopPropagation();rejectSignal(${s.id})">Reject</button>`;
+      }
+      row.innerHTML = `
+        <td>${s.id}</td>
+        <td>${time}</td>
+        <td><strong>${s.symbol}</strong></td>
+        <td>${sideBadge(s.side)}</td>
+        <td>${s.price?.toFixed(5) ?? '--'}</td>
+        <td>${s.stop_loss?.toFixed(5) ?? '--'}</td>
+        <td>${s.take_profit?.toFixed(5) ?? '--'}</td>
+        <td>${confBadge(s.confidence)}</td>
+        <td>${sourceName(s.strategy_type)}</td>
+        <td>${statusBadge(s.status)}</td>
+        <td>${actions}</td>
+      `;
+      row.addEventListener('click', () => showDetail(s));
+      tbody.appendChild(row);
+    });
+  }
+
+  function showDetail(s) {
+    document.getElementById('detail-section').style.display = '';
+    document.getElementById('detail-title').textContent = `Signal #${s.id}: ${s.side.toUpperCase()} ${s.symbol}`;
+
+    const grid = document.getElementById('detail-grid');
+    const time = s.created_at ? new Date(s.created_at).toLocaleString() : '--';
+    grid.innerHTML = `
+      <div class="status-item"><span class="status-label">Symbol</span><span class="status-value">${s.symbol}</span></div>
+      <div class="status-item"><span class="status-label">Side</span><span class="status-value">${sideBadge(s.side)}</span></div>
+      <div class="status-item"><span class="status-label">Confidence</span><span class="status-value">${confBadge(s.confidence)}</span></div>
+      <div class="status-item"><span class="status-label">Status</span><span class="status-value">${statusBadge(s.status)}</span></div>
+      <div class="status-item"><span class="status-label">Price</span><span class="status-value">${s.price?.toFixed(5) ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">Stop Loss</span><span class="status-value">${s.stop_loss?.toFixed(5) ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">Take Profit</span><span class="status-value">${s.take_profit?.toFixed(5) ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">Time</span><span class="status-value">${time}</span></div>
+    `;
+
+    const reasonEl = document.getElementById('detail-reasoning');
+    let text = '';
+    if (s.reason) text += s.reason + '\n\n';
+    if (s.claude_analysis && typeof s.claude_analysis === 'object') {
+      const a = s.claude_analysis;
+      if (a.reasoning) text += 'Claude: ' + a.reasoning + '\n';
+      if (a.signal) text += 'Signal: ' + a.signal + '\n';
+      if (a.confidence != null) text += 'Confidence: ' + (a.confidence * 100).toFixed(0) + '%\n';
+      if (a.stop_loss) text += 'Suggested SL: ' + a.stop_loss + '\n';
+      if (a.take_profit) text += 'Suggested TP: ' + a.take_profit + '\n';
+    } else if (s.claude_analysis) {
+      text += JSON.stringify(s.claude_analysis, null, 2);
+    }
+    reasonEl.textContent = text || 'No reasoning data available.';
+
+    document.getElementById('detail-section').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  async function executeSignal(id) {
+    const resp = await fetch(`/api/signals/${id}/execute`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) alert('Error: ' + data.error);
+    loadSignals();
+  }
+
+  async function rejectSignal(id) {
+    await fetch(`/api/signals/${id}/reject`, { method: 'POST' });
+    loadSignals();
+  }
+
+  document.getElementById('scan-now-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('scan-now-btn');
+    btn.disabled = true; btn.textContent = 'Scanning...';
+    const resp = await fetch('/api/signals/scan-now', { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) alert('Error: ' + data.error);
+    btn.disabled = false; btn.textContent = 'Scan Now';
+    loadSignals();
+  });
+
+  document.getElementById('clear-btn').addEventListener('click', async () => {
+    const resp = await fetch('/api/signals/clear', { method: 'POST' });
+    const data = await resp.json();
+    if (data.deleted != null) loadSignals();
+  });
+
+  document.getElementById('refresh-btn').addEventListener('click', loadSignals);
+  document.getElementById('filter-symbol').addEventListener('change', loadSignals);
+  document.getElementById('filter-status').addEventListener('change', loadSignals);
+
+  loadSignals();
+  setInterval(loadSignals, 15000);
+</script>
+{% endblock %}

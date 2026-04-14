@@ -1,0 +1,196 @@
+{% extends "base.html" %}
+{% set active_page = "calendar" %}
+
+{% block title %}Economic Calendar — WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Economic Calendar</h1>
+  <p>Upcoming economic events{% if news_enabled %} (auto-collection enabled){% else %} (collection disabled — enable in Settings){% endif %}.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Controls</h2>
+    <div class="toolbar">
+      <label>
+        Currency Filter
+        <select id="filter-currency">
+          <option value="">All</option>
+          <option value="USD">USD</option>
+          <option value="EUR">EUR</option>
+          <option value="GBP">GBP</option>
+          <option value="JPY">JPY</option>
+          <option value="AUD">AUD</option>
+          <option value="CAD">CAD</option>
+          <option value="CHF">CHF</option>
+          <option value="NZD">NZD</option>
+        </select>
+      </label>
+      <div class="button-wrap">
+        <button type="button" id="refresh-btn">Refresh</button>
+        <button type="button" id="fetch-btn">Fetch Calendar</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Symbol Status</h2>
+    <div class="status-grid" id="symbol-status">
+      {% for s in symbols %}
+      <div class="status-item">
+        <span class="status-label">{{ s }}</span>
+        <span class="status-value" id="status-{{ s }}">--</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>This Week's Events</h2>
+    <table class="table" id="events-table">
+      <thead>
+        <tr>
+          <th>Time (UTC)</th>
+          <th>Currency</th>
+          <th>Impact</th>
+          <th>Event</th>
+          <th>Forecast</th>
+          <th>Previous</th>
+          <th>Actual</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="7" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Sentiment</h2>
+    <div class="status-grid" id="sentiment-grid">
+      {% for s in symbols %}
+      <div class="status-item">
+        <span class="status-label">{{ s }}</span>
+        <span class="status-value" id="sent-{{ s }}">--</span>
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function impactBadge(impact) {
+    const colors = { high: '#e74c3c', medium: '#e67e22', low: '#888' };
+    const color = colors[impact] || '#888';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#fff;font-size:12px">${impact}</span>`;
+  }
+
+  function sentimentLabel(score) {
+    if (score > 0.2) return `<span style="color:#27ae60;font-weight:600">Bullish (${score.toFixed(2)})</span>`;
+    if (score < -0.2) return `<span style="color:#e74c3c;font-weight:600">Bearish (${score.toFixed(2)})</span>`;
+    return `<span style="color:#888;font-weight:600">Neutral (${score.toFixed(2)})</span>`;
+  }
+
+  async function loadWeekEvents() {
+    const currency = document.getElementById('filter-currency').value;
+    let url = '/api/calendar/week';
+
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const tbody = document.querySelector('#events-table tbody');
+    tbody.innerHTML = '';
+
+    let events = data.events || [];
+    if (currency) {
+      events = events.filter(e => e.currency === currency);
+    }
+
+    if (!events.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="small">No events found. Enable news collection in Settings and click Fetch Calendar.</td></tr>';
+      return;
+    }
+
+    events.forEach(e => {
+      const row = document.createElement('tr');
+      const time = new Date(e.event_time).toLocaleString(undefined, {
+        weekday: 'short', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit', timeZone: 'UTC'
+      });
+      row.innerHTML = `
+        <td>${time}</td>
+        <td><strong>${e.currency}</strong></td>
+        <td>${impactBadge(e.impact)}</td>
+        <td>${e.title}</td>
+        <td>${e.forecast || '--'}</td>
+        <td>${e.previous || '--'}</td>
+        <td>${e.actual || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadSymbolStatus() {
+    const symbols = [{% for s in symbols %}'{{ s }}',{% endfor %}];
+    for (const symbol of symbols) {
+      try {
+        const resp = await fetch(`/api/calendar/check/${symbol}`);
+        const data = await resp.json();
+        const el = document.getElementById(`status-${symbol}`);
+        if (data.blocked) {
+          el.innerHTML = `<span style="color:#e74c3c;font-weight:600">BLOCKED</span>`;
+          el.title = data.reason;
+        } else if (data.upcoming_events && data.upcoming_events.length > 0) {
+          const next = data.upcoming_events[0];
+          el.innerHTML = `<span style="color:#e67e22">${next.minutes_until}m → ${next.title}</span>`;
+        } else {
+          el.innerHTML = `<span style="color:#27ae60">Clear</span>`;
+        }
+      } catch (err) {
+        document.getElementById(`status-${symbol}`).textContent = 'Error';
+      }
+    }
+  }
+
+  async function loadSentiment() {
+    const symbols = [{% for s in symbols %}'{{ s }}',{% endfor %}];
+    for (const symbol of symbols) {
+      try {
+        const resp = await fetch(`/api/sentiment/${symbol}`);
+        const data = await resp.json();
+        const el = document.getElementById(`sent-${symbol}`);
+        if (data.score != null) {
+          el.innerHTML = sentimentLabel(data.score);
+        } else {
+          el.textContent = 'N/A';
+        }
+      } catch (err) {
+        document.getElementById(`sent-${symbol}`).textContent = 'Error';
+      }
+    }
+  }
+
+  document.getElementById('refresh-btn').addEventListener('click', () => {
+    loadWeekEvents();
+    loadSymbolStatus();
+    loadSentiment();
+  });
+
+  document.getElementById('fetch-btn').addEventListener('click', async () => {
+    document.getElementById('fetch-btn').disabled = true;
+    document.getElementById('fetch-btn').textContent = 'Fetching...';
+    await fetch('/api/calendar/refresh', { method: 'POST' });
+    document.getElementById('fetch-btn').disabled = false;
+    document.getElementById('fetch-btn').textContent = 'Fetch Calendar';
+    loadWeekEvents();
+    loadSymbolStatus();
+  });
+
+  document.getElementById('filter-currency').addEventListener('change', loadWeekEvents);
+
+  loadWeekEvents();
+  loadSymbolStatus();
+  loadSentiment();
+</script>
+{% endblock %}

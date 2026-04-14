@@ -1,0 +1,164 @@
+{% extends "base.html" %}
+{% set active_page = "charts" %}
+
+{% block title %}History Charts — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>History Charts</h1>
+  <p>Database-backed view of stored ticks with trade overlays.</p>
+</header>
+<main>
+  <section class="card">
+    <div class="toolbar">
+      <label>
+        Symbol
+        <select id="symbol-select">
+          {% for symbol in symbols %}
+          <option value="{{ symbol }}" {% if symbol == selected_symbol %}selected{% endif %}>{{ symbol }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframe
+        <select id="timeframe-select">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == selected_timeframe %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="button-wrap">
+        <button type="button" onclick="refreshChart()">Refresh</button>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="price-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Account Performance</h2>
+    <div class="chart-wrap-small">
+      <canvas id="account-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Trade Recommendations</h2>
+    <div id="recommendations" class="small">No recommendations yet.</div>
+  </section>
+
+  <section class="card">
+    <h2>Executed Trades</h2>
+    <div id="executions" class="small">No executions yet.</div>
+  </section>
+
+  <section class="card">
+    <h2>Active Trades</h2>
+    <table class="table" id="trade-updates">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Price</th>
+          <th>Status</th>
+          <th>Server</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let chartInstance = null;
+  let accountChartInstance = null;
+
+  async function fetchChartData() {
+    const symbol = document.getElementById("symbol-select").value;
+    const timeframe = document.getElementById("timeframe-select").value;
+    const resp = await fetch(`/api/history-data?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}`);
+    return resp.json();
+  }
+
+  async function fetchAccountData() {
+    const resp = await fetch("/api/account-performance");
+    return resp.json();
+  }
+
+  function buildChart(points) {
+    const ctx = document.getElementById("price-chart").getContext("2d");
+    if (chartInstance) chartInstance.destroy();
+    chartInstance = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: points.map(p => p.time),
+        datasets: [{
+          label: "Bid",
+          data: points.map(p => p.bid),
+          borderColor: "#1f4b57",
+          backgroundColor: "rgba(31,75,87,0.1)",
+          tension: 0.2,
+          pointRadius: 0,
+          fill: true,
+        }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { maxTicksLimit: 8 } } } },
+    });
+  }
+
+  function buildAccountChart(points) {
+    const ctx = document.getElementById("account-chart").getContext("2d");
+    if (accountChartInstance) accountChartInstance.destroy();
+    accountChartInstance = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: points.map(p => p.time),
+        datasets: [
+          { label: "Balance", data: points.map(p => p.balance), borderColor: "#6a4f2a", backgroundColor: "rgba(106,79,42,0.08)", tension: 0.2, pointRadius: 0 },
+          { label: "Equity", data: points.map(p => p.equity), borderColor: "#2a6a4f", backgroundColor: "rgba(42,106,79,0.08)", tension: 0.2, pointRadius: 0 },
+        ],
+      },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { display: false } } },
+    });
+  }
+
+  function renderList(targetId, items, labelBuilder) {
+    const el = document.getElementById(targetId);
+    if (!items.length) { el.textContent = "No data yet."; return; }
+    el.innerHTML = items.map(labelBuilder).join("<br />");
+  }
+
+  function renderTradeUpdates(updates) {
+    const body = document.querySelector("#trade-updates tbody");
+    body.innerHTML = "";
+    updates.forEach(u => {
+      const row = document.createElement("tr");
+      row.innerHTML = `<td>${u.symbol||""}</td><td>${u.side||""}</td><td>${u.price||""}</td><td>${u.status||""}</td><td>${u.server_id||""}</td>`;
+      body.appendChild(row);
+    });
+  }
+
+  async function refreshChart() {
+    const data = await fetchChartData();
+    buildChart(data.points || []);
+    renderList("recommendations", data.recommendations || [], i => `${i.time} - ${i.side} @ ${i.price}`);
+    renderList("executions", data.executions || [], i => `${i.time} - ${i.side} @ ${i.price} (${i.server_id})`);
+    renderTradeUpdates(data.trade_updates || []);
+  }
+
+  async function refreshAccountChart() {
+    const data = await fetchAccountData();
+    buildAccountChart(data.points || []);
+  }
+
+  refreshChart();
+  refreshAccountChart();
+</script>
+{% endblock %}

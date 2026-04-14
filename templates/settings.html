@@ -1,0 +1,217 @@
+{% extends "base.html" %}
+{% set active_page = "settings" %}
+
+{% block title %}Settings — WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Settings</h1>
+  <p>Configure market data sources, database, and candle collection.</p>
+</header>
+<main>
+  <form class="card" method="post" action="/settings">
+    <h2>Market Data</h2>
+    <label>
+      Currency Pairs (comma or newline)
+      <textarea name="symbols">{{ config.symbols | join('\n') }}</textarea>
+    </label>
+    <div class="row">
+      <label>
+        Default Source
+        <select name="default_source">
+          {% for value in supported_sources %}
+          <option value="{{ value }}" {% if value == config.default_source %}selected{% endif %}>{{ value | upper }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Poll Interval (seconds, 5-300)
+        <input type="number" min="5" max="300" name="poll_interval_sec" value="{{ config.poll_interval_sec }}" />
+      </label>
+      <label>
+        Request Timeout (seconds, 5-60)
+        <input type="number" min="5" max="60" step="0.5" name="request_timeout_sec" value="{{ config.request_timeout_sec }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Default Range
+        <select name="default_range">
+          {% for value in supported_ranges %}
+          <option value="{{ value }}" {% if value == config.default_range %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Default Interval
+        <select name="default_interval">
+          {% for value in supported_intervals %}
+          <option value="{{ value }}" {% if value == config.default_interval %}selected{% endif %}>{{ value }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+
+    <h2>MetaTrader 5</h2>
+    {% if mt5_available %}
+    <p class="small">MT5 Python package is available in this environment.</p>
+    {% else %}
+    <p class="small error">MT5 Python package is not installed in this environment.</p>
+    {% endif %}
+    <div class="row">
+      <label>
+        Terminal Path (optional)
+        <input name="mt5_terminal_path" value="{{ config.mt5.terminal_path }}" />
+      </label>
+      <label>
+        Symbol Suffix
+        <input name="mt5_symbol_suffix" value="{{ config.mt5.symbol_suffix }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Login (optional)
+        <input name="mt5_login" value="{{ config.mt5.login or '' }}" />
+      </label>
+      <label>
+        Server (optional)
+        <input name="mt5_server" value="{{ config.mt5.server }}" />
+      </label>
+    </div>
+    <label>
+      Password (optional)
+      <input type="password" name="mt5_password" value="{{ config.mt5.password }}" />
+    </label>
+
+    <h2>Database</h2>
+    <label>
+      PostgreSQL URL
+      <input name="database_url" value="{{ config.database_url }}" />
+    </label>
+
+    <h2>Candle Collection</h2>
+    <div class="row">
+      <label>
+        <input type="checkbox" name="candle_collection_enabled" style="width: auto;" {% if config.candle_collection_enabled %}checked{% endif %} />
+        Enable automatic candle collection
+      </label>
+      <label>
+        Collection Interval (seconds, 30-3600)
+        <input type="number" min="30" max="3600" name="candle_collection_interval_sec" value="{{ config.candle_collection_interval_sec }}" />
+      </label>
+    </div>
+
+    <h2>Claude API</h2>
+    <label>
+      API Key
+      <input type="password" name="claude_api_key" value="{{ config.claude.api_key }}" placeholder="sk-ant-..." />
+    </label>
+    <div class="row">
+      <label>
+        Signal Model
+        <input name="claude_model" value="{{ config.claude.model }}" />
+      </label>
+      <label>
+        Review / Evolve Model
+        <input name="claude_review_model" value="{{ config.claude.review_model }}" />
+      </label>
+      <label>
+        Temperature (0.0-1.0)
+        <input type="number" min="0" max="1" step="0.1" name="claude_temperature" value="{{ config.claude.temperature }}" />
+      </label>
+      <label>
+        <input type="checkbox" name="claude_enabled" style="width: auto;" {% if config.claude.enabled %}checked{% endif %} />
+        Enable Claude API
+      </label>
+    </div>
+
+    <h2>Signal Generation</h2>
+    <div class="row">
+      <label>
+        <input type="checkbox" name="signals_enabled" style="width: auto;" {% if config.signals.enabled %}checked{% endif %} />
+        Enable automatic signal scanning
+      </label>
+      <label>
+        Scan Interval (seconds)
+        <input type="number" min="30" max="3600" name="signals_scan_interval_sec" value="{{ config.signals.scan_interval_sec }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Timeframes (comma-separated)
+        <input name="signals_timeframes" value="{{ config.signals.timeframes | join(', ') }}" placeholder="1h, 4h" />
+      </label>
+      <label>
+        Min Confidence (0.0-1.0)
+        <input type="number" min="0" max="1" step="0.05" name="signals_min_confidence" value="{{ config.signals.min_confidence }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Max Signals Per Day
+        <input type="number" min="1" max="100" name="signals_max_per_day" value="{{ config.signals.max_signals_per_day }}" />
+      </label>
+      <label>
+        Cooldown (minutes)
+        <input type="number" min="5" max="1440" name="signals_cool_down_minutes" value="{{ config.signals.cool_down_minutes }}" />
+      </label>
+      <label>
+        <input type="checkbox" name="signals_require_claude" style="width: auto;" {% if config.signals.require_claude_confirmation %}checked{% endif %} />
+        Require Claude confirmation
+      </label>
+    </div>
+
+    <h2>News &amp; Calendar</h2>
+    <div class="row">
+      <label>
+        <input type="checkbox" name="news_enabled" style="width: auto;" {% if config.news.enabled %}checked{% endif %} />
+        Enable economic calendar collection
+      </label>
+      <label>
+        Collection Interval (seconds)
+        <input type="number" min="300" max="7200" name="news_collection_interval_sec" value="{{ config.news.collection_interval_sec }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        High-Impact Buffer (minutes before/after)
+        <input type="number" min="5" max="120" name="news_buffer_minutes" value="{{ config.news.high_impact_buffer_minutes }}" />
+      </label>
+      <label>
+        <input type="checkbox" name="news_sentiment_enabled" style="width: auto;" {% if config.news.sentiment_enabled %}checked{% endif %} />
+        Enable Claude sentiment analysis
+      </label>
+    </div>
+
+    <h2>Risk Management (Prop Firm)</h2>
+    <p class="small">These limits protect the account from exceeding prop firm drawdown rules. Trading mode and pause controls are on the <a href="/accounts">Accounts</a> page.</p>
+    <div class="row">
+      <label>
+        Risk Per Trade (%)
+        <input type="number" min="0.1" max="5" step="0.1" name="execution_risk_pct" value="{{ config.execution.risk_per_trade_pct }}" />
+        <span class="small">1% recommended — 3 simultaneous losses = 3% (under daily limit)</span>
+      </label>
+      <label>
+        Max Daily Loss (%)
+        <input type="number" min="1" max="10" step="0.5" name="execution_max_daily_loss" value="{{ config.execution.max_daily_loss_pct }}" />
+        <span class="small">Prop firm daily drawdown limit (includes unrealized P&L)</span>
+      </label>
+      <label>
+        Max Total Loss (%)
+        <input type="number" min="1" max="20" step="0.5" name="execution_max_total_loss" value="{{ config.execution.max_total_loss_pct }}" />
+        <span class="small">Prop firm max account drawdown — stops ALL trading if breached</span>
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Max Open Positions
+        <input type="number" min="1" max="10" name="execution_max_positions" value="{{ config.execution.max_open_positions }}" />
+        <span class="small">1 per currency pair enforced automatically</span>
+      </label>
+    </div>
+
+    <button type="submit">Save configuration</button>
+    <p class="small">Config path: {{ config_path }}</p>
+  </form>
+</main>
+{% endblock %}

@@ -1,0 +1,367 @@
+{% extends "base.html" %}
+{% set active_page = "training" %}
+
+{% block title %}Training — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Automated Training</h1>
+  <p>Replay historical data, iterate with Claude feedback, and deploy optimized parameters.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Start Training</h2>
+    <div class="row">
+      <label>
+        Name (optional)
+        <input id="train-name" placeholder="Auto-generated if blank" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Symbols
+        <select id="train-symbols" multiple style="height:80px">
+          {% for s in symbols %}
+          <option value="{{ s }}" selected>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframes
+        <select id="train-timeframes" multiple style="height:80px">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf in ['1h', '4h'] %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Strategies
+        <select id="train-strategies" multiple style="height:80px">
+          {% for s in strategies %}
+          <option value="{{ s.name }}" selected>{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Start Date
+        <input type="date" id="train-start" />
+      </label>
+      <label>
+        End Date
+        <input type="date" id="train-end" />
+      </label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="start-btn">Start Training</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Training Runs</h2>
+    <table class="table" id="runs-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Symbols</th>
+          <th>Strategies</th>
+          <th>Iterations</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="8" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="detail-section" style="display:none">
+    <h2 id="detail-title">Run Detail</h2>
+    <div id="detail-report" style="margin-bottom:15px"></div>
+
+    <h3>Convergence</h3>
+    <div class="chart-wrap">
+      <canvas id="convergence-chart"></canvas>
+    </div>
+
+    <h3>Iterations</h3>
+    <table class="table" id="iter-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Strategy</th>
+          <th>Symbol</th>
+          <th>TF</th>
+          <th>Parameters</th>
+          <th>Win Rate</th>
+          <th>Sharpe</th>
+          <th>PF</th>
+          <th>Max DD</th>
+          <th>Balance</th>
+          <th>Improvement</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>Claude Feedback</h3>
+    <div id="claude-feedback" style="white-space:pre-wrap;font-size:13px;max-height:400px;overflow-y:auto"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let convergenceChart = null;
+
+  // Default dates: 3 months ago to today
+  const today = new Date();
+  const threeMonthsAgo = new Date(today);
+  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+  document.getElementById('train-start').value = threeMonthsAgo.toISOString().slice(0, 10);
+  document.getElementById('train-end').value = today.toISOString().slice(0, 10);
+
+  function statusBadge(status) {
+    const colors = { running: '#e67e22', completed: '#27ae60', failed: '#e74c3c', pending: '#888' };
+    const c = colors[status] || '#888';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${c};color:#fff;font-size:12px">${status}</span>`;
+  }
+
+  function pnlColor(val) {
+    if (val == null) return '--';
+    const c = val >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${c}">${val >= 0 ? '+' : ''}${(val * 100).toFixed(1)}%</span>`;
+  }
+
+  async function loadRuns() {
+    const resp = await fetch('/api/training/runs');
+    const data = await resp.json();
+    const tbody = document.querySelector('#runs-table tbody');
+    tbody.innerHTML = '';
+
+    const runs = data.runs || [];
+    if (!runs.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No training runs yet.</td></tr>';
+      return;
+    }
+
+    runs.forEach(r => {
+      const row = document.createElement('tr');
+      row.style.cursor = 'pointer';
+      const created = new Date(r.created_at).toLocaleString();
+      let actions = `<button onclick="event.stopPropagation();showDetail(${r.id})">View</button>`;
+      if (r.status === 'running') {
+        actions += ` <button onclick="event.stopPropagation();stopRun(${r.id})">Stop</button>`;
+      }
+      if (r.status === 'completed') {
+        actions += ` <button onclick="event.stopPropagation();deployRun(${r.id})">Deploy</button>`;
+      }
+      row.innerHTML = `
+        <td>${r.id}</td>
+        <td>${r.name}</td>
+        <td>${statusBadge(r.status)}</td>
+        <td>${r.symbols.join(', ')}</td>
+        <td>${r.strategies.join(', ')}</td>
+        <td>${r.iterations_completed}</td>
+        <td>${created}</td>
+        <td>${actions}</td>
+      `;
+      row.addEventListener('click', () => showDetail(r.id));
+      tbody.appendChild(row);
+    });
+  }
+
+  async function showDetail(runId) {
+    const resp = await fetch(`/api/training/runs/${runId}`);
+    const data = await resp.json();
+    const run = data.run;
+    const iters = data.iterations || [];
+
+    document.getElementById('detail-section').style.display = '';
+    document.getElementById('detail-title').textContent = `Run #${run.id}: ${run.name}`;
+
+    // Show final report
+    const reportEl = document.getElementById('detail-report');
+    if (run.final_report) {
+      const r = run.final_report;
+      let html = '<div style="background:#f5f0e6;padding:12px;border-radius:6px;margin-bottom:10px">';
+      html += `<strong>Final Report</strong><br>`;
+      if (r.summary) html += `${r.summary}<br>`;
+      if (r.deploy_recommendation) html += `Recommendation: <strong>${r.deploy_recommendation}</strong><br>`;
+      if (r.overfitting_risk) html += `Overfitting risk: <strong>${r.overfitting_risk}</strong><br>`;
+      if (r.confidence != null) html += `Confidence: ${(r.confidence * 100).toFixed(0)}%<br>`;
+      if (r.improvements_found) html += `<br>Improvements: ${r.improvements_found.join('; ')}`;
+      html += '</div>';
+      reportEl.innerHTML = html;
+    } else {
+      reportEl.innerHTML = run.status === 'running' ? '<em>Training in progress...</em>' : '';
+    }
+
+    // Iterations table
+    const tbody = document.querySelector('#iter-table tbody');
+    tbody.innerHTML = '';
+    iters.forEach(it => {
+      const row = document.createElement('tr');
+      const params = Object.entries(it.parameters || {}).map(([k,v]) => `${k}=${v}`).join(', ');
+      row.innerHTML = `
+        <td>${it.iteration_number}</td>
+        <td>${it.strategy_type}</td>
+        <td>${it.symbol}</td>
+        <td>${it.timeframe}</td>
+        <td style="font-size:12px">${params}</td>
+        <td>${it.win_rate != null ? (it.win_rate * 100).toFixed(1) + '%' : '--'}</td>
+        <td>${it.sharpe_ratio != null ? it.sharpe_ratio.toFixed(2) : '--'}</td>
+        <td>${it.profit_factor != null ? it.profit_factor.toFixed(2) : '--'}</td>
+        <td>${it.max_drawdown != null ? (it.max_drawdown * 100).toFixed(1) + '%' : '--'}</td>
+        <td>$${it.final_balance != null ? it.final_balance.toFixed(2) : '--'}</td>
+        <td>${it.improvement_pct != null ? pnlColor(it.improvement_pct) : '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    // Convergence chart
+    if (iters.length > 0) {
+      const ctx = document.getElementById('convergence-chart').getContext('2d');
+      if (convergenceChart) convergenceChart.destroy();
+      convergenceChart = new Chart(ctx, {
+        type: 'line',
+        data: {
+          labels: iters.map(it => `#${it.iteration_number} ${it.strategy_type}`),
+          datasets: [
+            {
+              label: 'Sharpe Ratio',
+              data: iters.map(it => it.sharpe_ratio),
+              borderColor: '#1f4b57',
+              tension: 0.2,
+              yAxisID: 'y',
+            },
+            {
+              label: 'Win Rate',
+              data: iters.map(it => it.win_rate != null ? it.win_rate * 100 : null),
+              borderColor: '#27ae60',
+              tension: 0.2,
+              yAxisID: 'y1',
+            },
+          ]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: { position: 'left', title: { display: true, text: 'Sharpe' } },
+            y1: { position: 'right', title: { display: true, text: 'Win Rate %' }, grid: { drawOnChartArea: false } },
+          },
+        },
+      });
+    }
+
+    // Claude feedback
+    const feedbackEl = document.getElementById('claude-feedback');
+    let feedbackText = '';
+    iters.forEach(it => {
+      feedbackText += `=== Iteration ${it.iteration_number}: ${it.strategy_type} (${it.symbol}/${it.timeframe}) ===\n`;
+      feedbackText += `Parameters: ${JSON.stringify(it.parameters)}\n`;
+      feedbackText += `Results: WR=${it.win_rate != null ? (it.win_rate*100).toFixed(1)+'%' : '?'}, `;
+      feedbackText += `Sharpe=${it.sharpe_ratio?.toFixed(2) ?? '?'}, `;
+      feedbackText += `PF=${it.profit_factor?.toFixed(2) ?? '?'}, `;
+      feedbackText += `DD=${it.max_drawdown != null ? (it.max_drawdown*100).toFixed(1)+'%' : '?'}\n`;
+
+      if (it.improvement_pct != null) {
+        feedbackText += `Improvement: ${(it.improvement_pct * 100).toFixed(1)}%\n`;
+      }
+
+      if (it.claude_analysis && typeof it.claude_analysis === 'object') {
+        const a = it.claude_analysis;
+        if (a.error) {
+          feedbackText += `Claude: ${a.error}\n`;
+        } else {
+          if (a.reasoning) feedbackText += `\nClaude reasoning: ${a.reasoning}\n`;
+          if (a.confidence != null) feedbackText += `Claude confidence: ${(a.confidence * 100).toFixed(0)}%\n`;
+          if (a.data_feedback) {
+            if (a.data_feedback.useful && a.data_feedback.useful.length)
+              feedbackText += `Useful data: ${a.data_feedback.useful.join(', ')}\n`;
+            if (a.data_feedback.exclude && a.data_feedback.exclude.length)
+              feedbackText += `Exclude: ${a.data_feedback.exclude.join(', ')}\n`;
+          }
+          if (a.risk_adjustments) {
+            const ra = a.risk_adjustments;
+            if (ra.sl_atr_multiplier) feedbackText += `SL ATR multiplier: ${ra.sl_atr_multiplier}\n`;
+            if (ra.tp_atr_multiplier) feedbackText += `TP ATR multiplier: ${ra.tp_atr_multiplier}\n`;
+          }
+        }
+      } else {
+        feedbackText += `(No Claude analysis — heuristic adjustments used)\n`;
+      }
+
+      if (it.suggested_params) {
+        feedbackText += `Next params: ${JSON.stringify(it.suggested_params)}\n`;
+      }
+      feedbackText += '\n';
+    });
+    feedbackEl.textContent = feedbackText || 'No iterations completed yet.';
+
+    document.getElementById('detail-section').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  async function stopRun(id) {
+    await fetch(`/api/training/runs/${id}/stop`, { method: 'POST' });
+    loadRuns();
+  }
+
+  async function deployRun(id) {
+    const resp = await fetch(`/api/training/runs/${id}/deploy`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) {
+      alert('Error: ' + data.error);
+    } else {
+      const d = data.deployed;
+      alert(`Deployed: ${d.strategy_type} on ${d.symbol}/${d.timeframe}\nParams: ${JSON.stringify(d.parameters)}\nSharpe: ${d.sharpe_ratio?.toFixed(2)}`);
+    }
+  }
+
+  document.getElementById('start-btn').addEventListener('click', async () => {
+    const name = document.getElementById('train-name').value;
+    const symbols = Array.from(document.getElementById('train-symbols').selectedOptions).map(o => o.value);
+    const timeframes = Array.from(document.getElementById('train-timeframes').selectedOptions).map(o => o.value);
+    const strategies = Array.from(document.getElementById('train-strategies').selectedOptions).map(o => o.value);
+    const startDate = document.getElementById('train-start').value;
+    const endDate = document.getElementById('train-end').value;
+
+    if (!symbols.length || !strategies.length || !startDate || !endDate) {
+      alert('Please select symbols, strategies, and date range.');
+      return;
+    }
+
+    const btn = document.getElementById('start-btn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+
+    const resp = await fetch('/api/training/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name, symbols, timeframes, strategies,
+        start_date: startDate + 'T00:00:00+00:00',
+        end_date: endDate + 'T23:59:59+00:00',
+      }),
+    });
+    const data = await resp.json();
+    btn.disabled = false;
+    btn.textContent = 'Start Training';
+
+    if (data.error) alert('Error: ' + data.error);
+    else loadRuns();
+  });
+
+  loadRuns();
+  setInterval(loadRuns, 10000);
+</script>
+{% endblock %}

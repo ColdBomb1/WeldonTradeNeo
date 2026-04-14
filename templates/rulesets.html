@@ -1,0 +1,642 @@
+{% extends "base.html" %}
+{% set active_page = "rulesets" %}
+
+{% block title %}Rule Sets — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Rule-Based Strategies</h1>
+  <p>Define trading rules in natural language. Claude interprets the rules against market data to generate signals, then evolves the rules through training.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Create Rule Set</h2>
+    <label>
+      Name
+      <input id="rs-name" placeholder="My RSI Strategy" />
+    </label>
+    <label>
+      Trading Rules
+      <textarea id="rs-rules" rows="8" placeholder="1. Buy when RSI drops below 30 and then crosses back above 30
+2. Only buy if price is above the 200 SMA (confirming uptrend)
+3. Sell when RSI rises above 70 and then crosses back below 70
+4. Place stop loss 1.5x ATR below entry
+5. Take profit at 2x the stop loss distance
+6. Avoid trading within 30 minutes of high-impact news"></textarea>
+    </label>
+    <div class="row">
+      <label>
+        Symbols
+        <select id="rs-symbols" multiple style="height:60px">
+          {% for s in symbols %}
+          <option value="{{ s }}" selected>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframes
+        <select id="rs-timeframes" multiple style="height:60px">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf in ['1h', '4h'] %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="create-btn">Create</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Rule Sets</h2>
+    <table class="table" id="rs-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Version</th>
+          <th>Symbols</th>
+          <th>Win Rate</th>
+          <th>Sharpe</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="8" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="detail-section" style="display:none">
+    <h2 style="display:flex;align-items:center;gap:8px">
+      <input id="detail-name" value="" style="font:inherit;border:1px solid transparent;background:transparent;padding:2px 6px;border-radius:4px;flex:1;min-width:0" />
+      <span id="detail-id" style="font-size:14px;color:#888;white-space:nowrap"></span>
+    </h2>
+
+    <div class="row" style="margin-bottom:8px">
+      <label>Symbols <select id="detail-symbols" multiple style="height:50px">
+        {% for s in symbols %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select></label>
+      <label>Timeframes <select id="detail-timeframes" multiple style="height:50px">
+        {% for tf in timeframes %}<option value="{{ tf }}">{{ tf }}</option>{% endfor %}
+      </select></label>
+    </div>
+
+    <h3>Rules (v<span id="detail-version">1</span>)</h3>
+    <textarea id="detail-rules" rows="10" style="width:100%;font-family:monospace;font-size:13px"></textarea>
+    <button type="button" id="save-rules-btn" style="margin-top:5px">Save Rules</button>
+
+    <h3>Backtest</h3>
+    <div class="row">
+      <label>Symbols <select id="bt-symbols" multiple style="height:60px">
+        <option value="all" selected>All Configured</option>
+        {% for s in symbols %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select></label>
+      <label>Timeframe <select id="bt-timeframe">
+        {% for tf in timeframes %}<option value="{{ tf }}" {% if tf == '4h' %}selected{% endif %}>{{ tf }}</option>{% endfor %}
+      </select></label>
+      <label>Start <input type="date" id="bt-start" /></label>
+      <label>End <input type="date" id="bt-end" /></label>
+      <label>Speed
+        <select id="bt-mode">
+          <option value="batch" selected>Batch (fast, recommended)</option>
+          <option value="filtered">Filtered (fastest)</option>
+          <option value="bar_by_bar">Bar-by-bar (slow, most accurate)</option>
+        </select>
+      </label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="backtest-btn">Run Backtest</button>
+      </div>
+    </div>
+    <div id="bt-progress" style="margin-top:10px;display:none">
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">Progress</span><span class="status-value" id="bp-pct">--</span></div>
+        <div class="status-item"><span class="status-label">Balance</span><span class="status-value" id="bp-balance">--</span></div>
+        <div class="status-item"><span class="status-label">Trades</span><span class="status-value" id="bp-trades">--</span></div>
+        <div class="status-item"><span class="status-label">Wins</span><span class="status-value" id="bp-wins">--</span></div>
+        <div class="status-item"><span class="status-label">Max DD</span><span class="status-value" id="bp-dd">--</span></div>
+      </div>
+      <button type="button" id="bt-stop-btn" style="margin:5px 0">Stop Backtest</button>
+      <div class="chart-wrap" style="height:250px">
+        <canvas id="bt-equity-chart"></canvas>
+      </div>
+    </div>
+    <div id="bt-results" style="margin-top:10px"></div>
+
+    <h3>Train (Evolve Rules)</h3>
+    <div class="row">
+      <label>Symbols <select id="tr-symbols" multiple style="height:60px">
+        <option value="all" selected>All Configured</option>
+        {% for s in symbols %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+      </select></label>
+      <label>Timeframe <select id="tr-timeframe">
+        {% for tf in timeframes %}<option value="{{ tf }}" {% if tf == '4h' %}selected{% endif %}>{{ tf }}</option>{% endfor %}
+      </select></label>
+      <label>Start <input type="date" id="tr-start" /></label>
+      <label>End <input type="date" id="tr-end" /></label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label>Starting Balance <input type="number" id="tr-balance" value="100000" min="1000" step="1000" style="width:110px" /></label>
+      <label>Target DD % <input type="number" id="tr-target-dd" value="5" min="0.5" max="50" step="0.5" style="width:70px" /></label>
+      <label>Target Profit % <input type="number" id="tr-target-profit" value="10" min="1" max="200" step="1" style="width:70px" /></label>
+      <label>Max Passes <input type="number" id="tr-passes" min="1" max="100" value="{{ config.training.max_iterations }}" style="width:70px" /></label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="train-btn">Start Training</button>
+      </div>
+    </div>
+    <div id="train-progress" style="margin-top:10px;display:none">
+      <div class="status-grid">
+        <div class="status-item"><span class="status-label">Pass</span><span class="status-value" id="tp-iter">--</span></div>
+        <div class="status-item"><span class="status-label">Balance</span><span class="status-value" id="tp-balance">--</span></div>
+        <div class="status-item"><span class="status-label">Drawdown</span><span class="status-value" id="tp-dd">--</span></div>
+        <div class="status-item"><span class="status-label">Profit</span><span class="status-value" id="tp-profit">--</span></div>
+        <div class="status-item"><span class="status-label">Sharpe</span><span class="status-value" id="tp-sharpe">--</span></div>
+        <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value" id="tp-wr">--</span></div>
+        <div class="status-item"><span class="status-label">PF</span><span class="status-value" id="tp-pf">--</span></div>
+      </div>
+      <button type="button" id="tr-stop-btn" style="margin:5px 0">Stop Training</button>
+      <div style="display:flex;gap:15px;flex-wrap:wrap;margin-top:8px">
+        <div style="flex:1;min-width:300px">
+          <h4>Current Pass Equity</h4>
+          <div class="chart-wrap" style="height:200px">
+            <canvas id="tr-equity-chart"></canvas>
+          </div>
+        </div>
+        <div style="flex:1;min-width:300px">
+          <h4>Convergence</h4>
+          <div class="chart-wrap" style="height:200px">
+            <canvas id="tr-convergence-chart"></canvas>
+          </div>
+        </div>
+      </div>
+      <h4>Rule Changes</h4>
+      <div id="tr-changes" style="max-height:300px;overflow-y:auto;font-size:13px;white-space:pre-wrap"></div>
+    </div>
+    <div id="train-status" style="margin-top:10px"></div>
+
+    <h3>Performance</h3>
+    <div id="perf-display" class="status-grid"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let currentRsId = null;
+  let activeBtId = null, activeRunId = null;
+  let btPollTimer = null, trPollTimer = null;
+  let btEquityChart = null, trConvergenceChart = null, trEquityChart = null;
+
+  const today = new Date();
+  const threeMonthsAgo = new Date(today);
+  threeMonthsAgo.setMonth(threeMonthsAgo.getMonth() - 3);
+  const dateStr = d => d.toISOString().slice(0, 10);
+
+  document.querySelectorAll('[id$="-start"]').forEach(el => el.value = dateStr(threeMonthsAgo));
+  document.querySelectorAll('[id$="-end"]').forEach(el => el.value = dateStr(today));
+
+  function statusBadge(status) {
+    const colors = { active: '#27ae60', inactive: '#888', training: '#e67e22' };
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#888'};color:#fff;font-size:12px">${status}</span>`;
+  }
+
+  function pnlSpan(v) {
+    if (v == null) return '--';
+    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
+  }
+
+  // ---- Ruleset list ----
+  async function loadRulesets() {
+    const resp = await fetch('/api/rulesets');
+    const data = await resp.json();
+    const tbody = document.querySelector('#rs-table tbody');
+    tbody.innerHTML = '';
+    const rulesets = data.rulesets || [];
+    if (!rulesets.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No rule sets yet. Create one above.</td></tr>';
+      return;
+    }
+    rulesets.forEach(rs => {
+      const row = document.createElement('tr');
+      row.style.cursor = 'pointer';
+      const pm = rs.performance_metrics || {};
+      let actions = '';
+      if (rs.status === 'active') {
+        actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'deactivate')">Deactivate</button>`;
+      } else {
+        actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'activate')">Activate</button>`;
+      }
+      actions += ` <button onclick="event.stopPropagation();duplicateRs(${rs.id})">Clone</button>`;
+      if (rs.status !== 'active') {
+        actions += ` <button class="btn-danger btn-sm" onclick="event.stopPropagation();deleteRs(${rs.id},'${rs.name.replace(/'/g,"\\'")}')">Delete</button>`;
+      }
+      row.innerHTML = `
+        <td>${rs.id}</td><td>${rs.name}</td><td>${statusBadge(rs.status)}</td><td>v${rs.version}</td>
+        <td>${(rs.symbols||[]).join(', ')}</td>
+        <td>${pm.win_rate != null ? (pm.win_rate*100).toFixed(1)+'%' : '--'}</td>
+        <td>${pm.sharpe_ratio != null ? pm.sharpe_ratio.toFixed(2) : '--'}</td>
+        <td>${actions}</td>
+      `;
+      row.addEventListener('click', () => showDetail(rs.id));
+      tbody.appendChild(row);
+    });
+  }
+
+  async function showDetail(id) {
+    currentRsId = id;
+    const resp = await fetch(`/api/rulesets/${id}`);
+    const rs = await resp.json();
+    document.getElementById('detail-section').style.display = '';
+    document.getElementById('detail-name').value = rs.name;
+    document.getElementById('detail-id').textContent = `(ID: ${rs.id})`;
+    document.getElementById('detail-version').textContent = rs.version;
+    // Set symbols multi-select
+    const symEl = document.getElementById('detail-symbols');
+    const rsSymbols = rs.symbols || [];
+    [...symEl.options].forEach(o => { o.selected = rsSymbols.includes(o.value); });
+    // Set timeframes multi-select
+    const tfEl = document.getElementById('detail-timeframes');
+    const rsTf = rs.timeframes || [];
+    [...tfEl.options].forEach(o => { o.selected = rsTf.includes(o.value); });
+    document.getElementById('detail-rules').value = rs.rules_text;
+    const pm = rs.performance_metrics || {};
+    const perfEl = document.getElementById('perf-display');
+    if (pm.total_trades != null) {
+      perfEl.innerHTML = `
+        <div class="status-item"><span class="status-label">Trades</span><span class="status-value">${pm.total_trades}</span></div>
+        <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value">${pm.win_rate != null ? (pm.win_rate*100).toFixed(1)+'%' : '--'}</span></div>
+        <div class="status-item"><span class="status-label">Sharpe</span><span class="status-value">${pm.sharpe_ratio?.toFixed(2) ?? '--'}</span></div>
+        <div class="status-item"><span class="status-label">PF</span><span class="status-value">${pm.profit_factor?.toFixed(2) ?? '--'}</span></div>
+        <div class="status-item"><span class="status-label">Max DD</span><span class="status-value">${pm.max_drawdown != null ? (pm.max_drawdown*100).toFixed(1)+'%' : '--'}</span></div>
+        <div class="status-item"><span class="status-label">Balance</span><span class="status-value">$${pm.final_balance?.toFixed(2) ?? '--'}</span></div>
+      `;
+    } else {
+      perfEl.innerHTML = '<em>No backtest results yet</em>';
+    }
+    document.getElementById('detail-section').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  async function toggleStatus(id, action) {
+    await fetch(`/api/rulesets/${id}/${action}`, { method: 'POST' });
+    loadRulesets();
+  }
+  async function duplicateRs(id) {
+    await fetch(`/api/rulesets/${id}/duplicate`, { method: 'POST' });
+    loadRulesets();
+  }
+  async function deleteRs(id, name) {
+    if (!confirm(`Delete ruleset "${name}"? This cannot be undone.`)) return;
+    const resp = await fetch(`/api/rulesets/${id}`, { method: 'DELETE' });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    if (currentRsId === id) {
+      currentRsId = null;
+      document.getElementById('detail-section').style.display = 'none';
+    }
+    loadRulesets();
+  }
+
+  // ---- Create ----
+  document.getElementById('create-btn').addEventListener('click', async () => {
+    const name = document.getElementById('rs-name').value;
+    const rules = document.getElementById('rs-rules').value;
+    const symbols = Array.from(document.getElementById('rs-symbols').selectedOptions).map(o => o.value);
+    const timeframes = Array.from(document.getElementById('rs-timeframes').selectedOptions).map(o => o.value);
+    if (!rules.trim()) { alert('Please enter trading rules.'); return; }
+    await fetch('/api/rulesets', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name || 'Untitled', rules_text: rules, symbols, timeframes }),
+    });
+    document.getElementById('rs-name').value = '';
+    document.getElementById('rs-rules').value = '';
+    loadRulesets();
+  });
+
+  // Rename on blur or Enter
+  const nameInput = document.getElementById('detail-name');
+  async function saveName() {
+    if (!currentRsId) return;
+    const newName = nameInput.value.trim();
+    if (!newName) return;
+    await fetch(`/api/rulesets/${currentRsId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    });
+    loadRulesets();
+  }
+  nameInput.addEventListener('blur', saveName);
+  nameInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); nameInput.blur(); } });
+  nameInput.addEventListener('focus', () => { nameInput.style.borderColor = 'var(--accent)'; });
+  nameInput.addEventListener('blur', () => { nameInput.style.borderColor = 'transparent'; });
+
+  document.getElementById('save-rules-btn').addEventListener('click', async () => {
+    if (!currentRsId) return;
+    await fetch(`/api/rulesets/${currentRsId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        rules_text: document.getElementById('detail-rules').value,
+        symbols: [...document.getElementById('detail-symbols').selectedOptions].map(o => o.value),
+        timeframes: [...document.getElementById('detail-timeframes').selectedOptions].map(o => o.value),
+      }),
+    });
+    showDetail(currentRsId);
+    loadRulesets();
+  });
+
+  // ---- Backtest with live progress ----
+  function updateBtChart(curve) {
+    const ctx = document.getElementById('bt-equity-chart').getContext('2d');
+    if (btEquityChart) btEquityChart.destroy();
+    btEquityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: curve.map(p => p.time ? new Date(p.time).toLocaleDateString() : ''),
+        datasets: [{
+          label: 'Equity', data: curve.map(p => p.equity),
+          borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)',
+          tension: 0.2, pointRadius: 0, fill: true,
+        }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        scales: { x: { ticks: { maxTicksLimit: 8 } } } },
+    });
+  }
+
+  async function pollBacktest() {
+    if (!activeBtId) return;
+    try {
+      const resp = await fetch(`/api/rulesets/backtest/${activeBtId}/progress`);
+      const p = await resp.json();
+      if (p.error) return;
+
+      document.getElementById('bp-pct').textContent = `${p.pct}% (${p.bar}/${p.total_bars})`;
+      document.getElementById('bp-balance').innerHTML = pnlSpan(p.balance);
+      document.getElementById('bp-trades').textContent = `${p.trades} (${p.wins} W)`;
+      document.getElementById('bp-wins').textContent = p.trades > 0 ? `${(p.wins/p.trades*100).toFixed(0)}%` : '--';
+      document.getElementById('bp-dd').textContent = p.max_drawdown != null ? `${(p.max_drawdown*100).toFixed(1)}%` : '--';
+
+      if (p.equity_curve && p.equity_curve.length > 1) updateBtChart(p.equity_curve);
+
+      if (p.status === 'completed') {
+        clearInterval(btPollTimer); btPollTimer = null;
+        document.getElementById('bt-stop-btn').style.display = 'none';
+        document.getElementById('backtest-btn').disabled = false;
+        document.getElementById('backtest-btn').textContent = 'Run Backtest';
+        if (p.results) {
+          const r = p.results;
+          document.getElementById('bt-results').innerHTML = `
+            <strong>Final:</strong> ${r.total_trades} trades |
+            WR: ${(r.win_rate*100).toFixed(1)}% | Sharpe: ${r.sharpe_ratio?.toFixed(2)} |
+            PF: ${r.profit_factor?.toFixed(2)} | DD: ${(r.max_drawdown*100).toFixed(1)}% |
+            Balance: $${r.final_balance?.toFixed(2)}
+          `;
+        }
+        showDetail(currentRsId);
+        loadRulesets();
+      }
+    } catch (e) { console.error('Backtest poll error:', e); }
+  }
+
+  document.getElementById('backtest-btn').addEventListener('click', async () => {
+    if (!currentRsId) return;
+    const btn = document.getElementById('backtest-btn');
+    btn.disabled = true; btn.textContent = 'Starting...';
+    document.getElementById('bt-results').innerHTML = '';
+
+    const symbolsEl = document.getElementById('bt-symbols');
+    const selectedSymbols = Array.from(symbolsEl.selectedOptions).map(o => o.value);
+    const symbolsParam = selectedSymbols.includes('all') ? 'all' : selectedSymbols;
+
+    const resp = await fetch(`/api/rulesets/${currentRsId}/backtest`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: symbolsParam,
+        timeframe: document.getElementById('bt-timeframe').value,
+        start_date: document.getElementById('bt-start').value + 'T00:00:00+00:00',
+        end_date: document.getElementById('bt-end').value + 'T23:59:59+00:00',
+        mode: document.getElementById('bt-mode').value,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      btn.disabled = false; btn.textContent = 'Run Backtest';
+      document.getElementById('bt-results').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      return;
+    }
+    activeBtId = data.bt_id;
+    btn.textContent = 'Running...';
+    document.getElementById('bt-progress').style.display = '';
+    document.getElementById('bt-stop-btn').style.display = '';
+    if (btPollTimer) clearInterval(btPollTimer);
+    btPollTimer = setInterval(pollBacktest, 2000);
+  });
+
+  document.getElementById('bt-stop-btn').addEventListener('click', async () => {
+    if (activeBtId) await fetch(`/api/rulesets/backtest/${activeBtId}/stop`, { method: 'POST' });
+  });
+
+  // ---- Training with live progress ----
+  function updateTrChart(iterations) {
+    const ctx = document.getElementById('tr-convergence-chart').getContext('2d');
+    if (trConvergenceChart) trConvergenceChart.destroy();
+    trConvergenceChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: iterations.map(it => `#${it.iteration_number}`),
+        datasets: [
+          { label: 'Sharpe', data: iterations.map(it => it.sharpe_ratio),
+            borderColor: '#1f4b57', tension: 0.2, yAxisID: 'y' },
+          { label: 'Win Rate %', data: iterations.map(it => it.win_rate != null ? it.win_rate*100 : null),
+            borderColor: '#27ae60', tension: 0.2, yAxisID: 'y1' },
+        ]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        scales: {
+          y: { position: 'left', title: { display: true, text: 'Sharpe' } },
+          y1: { position: 'right', title: { display: true, text: 'Win %' }, grid: { drawOnChartArea: false } },
+        }
+      },
+    });
+  }
+
+  const symColors = ['#1f4b57', '#27ae60', '#e67e22', '#8e44ad', '#e74c3c', '#2980b9'];
+
+  function updateTrEquity(perSymbolCurves, initialBalance) {
+    const ctx = document.getElementById('tr-equity-chart').getContext('2d');
+    if (trEquityChart) trEquityChart.destroy();
+    if (!perSymbolCurves || !Object.keys(perSymbolCurves).length) return;
+    const startBal = initialBalance || 100000;
+
+    // Find the longest curve for x-axis labels
+    let longestKey = Object.keys(perSymbolCurves)[0];
+    for (const [sym, curve] of Object.entries(perSymbolCurves)) {
+      if (curve.length > (perSymbolCurves[longestKey]?.length || 0)) longestKey = sym;
+    }
+    const longest = perSymbolCurves[longestKey] || [];
+    const step = Math.max(1, Math.floor(longest.length / 150));
+    const labels = longest.filter((_, i) => i % step === 0).map(p => p.time ? new Date(p.time).toLocaleDateString() : '');
+
+    const datasets = [];
+    let colorIdx = 0;
+    for (const [sym, curve] of Object.entries(perSymbolCurves)) {
+      const sampled = curve.filter((_, i) => i % step === 0);
+      datasets.push({
+        label: sym, data: sampled.map(p => p.equity),
+        borderColor: symColors[colorIdx % symColors.length],
+        tension: 0.2, pointRadius: 0, fill: false, borderWidth: 2,
+      });
+      colorIdx++;
+    }
+    // Starting balance reference line
+    datasets.push({
+      label: 'Starting', data: labels.map(() => startBal),
+      borderColor: '#888', borderWidth: 1, borderDash: [4,2],
+      pointRadius: 0, fill: false,
+    });
+
+    trEquityChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels, datasets },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        scales: { x: { ticks: { maxTicksLimit: 6 } } } },
+    });
+  }
+
+  async function pollTraining() {
+    if (!activeRunId) return;
+    try {
+      const resp = await fetch(`/api/rulesets/training/${activeRunId}/progress`);
+      const p = await resp.json();
+      if (p.error) return;
+
+      const iters = p.iterations || [];
+      const last = iters[iters.length - 1];
+      const startBal = p.initial_balance || 100000;
+      document.getElementById('tp-iter').textContent = `${p.iteration}/${p.max_iterations}`;
+      document.getElementById('tp-sharpe').textContent = last?.sharpe_ratio?.toFixed(2) ?? '--';
+      document.getElementById('tp-wr').textContent = last?.win_rate != null ? `${(last.win_rate*100).toFixed(1)}%` : '--';
+      document.getElementById('tp-pf').textContent = last?.profit_factor?.toFixed(2) ?? '--';
+
+      // Balance, drawdown, profit stats
+      const bal = last?.final_balance;
+      document.getElementById('tp-balance').innerHTML = bal != null
+        ? `$${bal.toLocaleString(undefined, {minimumFractionDigits: 0})}` : '--';
+      const dd = last?.max_drawdown;
+      const ddPct = dd != null ? (dd * 100).toFixed(1) + '%' : '--';
+      const ddTarget = p.target_dd_pct;
+      const ddOk = dd != null && ddTarget && dd <= ddTarget / 100;
+      document.getElementById('tp-dd').innerHTML = dd != null
+        ? `<span style="color:${ddOk ? '#27ae60' : '#e74c3c'}">${ddPct}</span>` : '--';
+      const profitPct = bal != null ? ((bal - startBal) / startBal * 100) : null;
+      const profitTarget = p.target_profit_pct;
+      const profitOk = profitPct != null && profitTarget && profitPct >= profitTarget;
+      document.getElementById('tp-profit').innerHTML = profitPct != null
+        ? `<span style="color:${profitOk ? '#27ae60' : '#e74c3c'}">${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(1)}%</span>` : '--';
+
+      if (iters.length > 0) updateTrChart(iters);
+      if (p.per_symbol_curves) updateTrEquity(p.per_symbol_curves, startBal);
+
+      // Render rule changes log
+      let changesText = '';
+      iters.forEach(it => {
+        changesText += `=== Iteration ${it.iteration_number} ===\n`;
+        changesText += `Sharpe: ${it.sharpe_ratio?.toFixed(2) ?? '?'} | WR: ${it.win_rate != null ? (it.win_rate*100).toFixed(1)+'%' : '?'} | PF: ${it.profit_factor?.toFixed(2) ?? '?'}`;
+        if (it.improvement_pct != null) changesText += ` | Change: ${(it.improvement_pct*100).toFixed(1)}%`;
+        changesText += '\n';
+        if (it.changes_made && it.changes_made.length) {
+          changesText += 'Changes:\n' + it.changes_made.map(c => `  - ${c}`).join('\n') + '\n';
+        }
+        if (it.reasoning) changesText += `Reasoning: ${it.reasoning}\n`;
+        changesText += '\n';
+      });
+      document.getElementById('tr-changes').textContent = changesText;
+
+      if (p.status === 'completed' || p.status === 'stopped') {
+        clearInterval(trPollTimer); trPollTimer = null;
+        activeRunId = null;
+        document.getElementById('tr-stop-btn').style.display = 'none';
+        document.getElementById('train-btn').disabled = false;
+        document.getElementById('train-btn').textContent = 'Start Training';
+        if (p.status === 'completed') {
+          document.getElementById('train-status').innerHTML =
+            `<span style="color:#27ae60">Training complete! Rules updated to best iteration. <a href="#" onclick="showDetail(${currentRsId});return false">Refresh</a> to see new rules.</span>`;
+        }
+        showDetail(currentRsId);
+        loadRulesets();
+      }
+    } catch (e) { console.error('Training poll error:', e); }
+  }
+
+  document.getElementById('train-btn').addEventListener('click', async () => {
+    if (!currentRsId) return;
+    const btn = document.getElementById('train-btn');
+    btn.disabled = true; btn.textContent = 'Starting...';
+    document.getElementById('train-status').innerHTML = '';
+
+    const resp = await fetch(`/api/rulesets/${currentRsId}/train`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols: [...document.getElementById('tr-symbols').selectedOptions].map(o => o.value).includes('all')
+          ? 'all' : [...document.getElementById('tr-symbols').selectedOptions].map(o => o.value),
+        timeframe: document.getElementById('tr-timeframe').value,
+        start_date: document.getElementById('tr-start').value + 'T00:00:00+00:00',
+        end_date: document.getElementById('tr-end').value + 'T23:59:59+00:00',
+        max_iterations: parseInt(document.getElementById('tr-passes').value) || 5,
+        initial_balance: parseFloat(document.getElementById('tr-balance').value) || 100000,
+        target_dd_pct: parseFloat(document.getElementById('tr-target-dd').value) || 5,
+        target_profit_pct: parseFloat(document.getElementById('tr-target-profit').value) || 10,
+      }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      btn.disabled = false; btn.textContent = 'Start Training';
+      document.getElementById('train-status').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      return;
+    }
+    activeRunId = data.run_id;
+    btn.textContent = 'Training...';
+    document.getElementById('train-progress').style.display = '';
+    document.getElementById('tr-stop-btn').style.display = '';
+    document.getElementById('tr-changes').textContent = '';
+    if (trPollTimer) clearInterval(trPollTimer);
+    trPollTimer = setInterval(pollTraining, 3000);
+  });
+
+  document.getElementById('tr-stop-btn').addEventListener('click', async () => {
+    if (activeRunId) await fetch(`/api/rulesets/training/${activeRunId}/stop`, { method: 'POST' });
+    if (trPollTimer) { clearInterval(trPollTimer); trPollTimer = null; }
+    activeRunId = null;
+    document.getElementById('tr-stop-btn').style.display = 'none';
+    document.getElementById('train-btn').disabled = false;
+    document.getElementById('train-btn').textContent = 'Start Training';
+    document.getElementById('train-status').innerHTML = '<span style="color:#e67e22">Training stopped.</span>';
+  });
+
+  loadRulesets();
+
+  // Resume training UI if a training run is active (e.g. navigated away and came back)
+  (async function checkActiveTraining() {
+    try {
+      const resp = await fetch('/api/rulesets/training/active');
+      const data = await resp.json();
+      const active = (data.active || [])[0];
+      if (active && active.status === 'running') {
+        activeRunId = active.run_id;
+        document.getElementById('train-btn').disabled = true;
+        document.getElementById('train-btn').textContent = 'Training...';
+        document.getElementById('train-progress').style.display = '';
+        document.getElementById('tr-stop-btn').style.display = '';
+        if (trPollTimer) clearInterval(trPollTimer);
+        trPollTimer = setInterval(pollTraining, 3000);
+        pollTraining();
+      }
+    } catch (e) {}
+  })();
+</script>
+{% endblock %}

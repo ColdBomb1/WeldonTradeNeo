@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% set active_page = "accounts" %}
+
+{% block title %}Accounts — WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Trading Accounts</h1>
+  <p>Live account monitoring, trade controls, and execution management.</p>
+</header>
+<main>
+  <div id="account-cards"></div>
+
+  <section class="card">
+    <h2>Trading Controls</h2>
+    <div class="toolbar">
+      <div class="button-wrap">
+        <button type="button" id="pause-btn" style="background:#e67e22">Pause Trading</button>
+        <button type="button" id="resume-btn" style="background:#27ae60">Resume Trading</button>
+      </div>
+      <label>
+        Execution Mode
+        <select id="mode-select">
+          <option value="paper">Paper (Simulated)</option>
+          <option value="live">LIVE (Real Money)</option>
+        </select>
+      </label>
+      <div class="button-wrap">
+        <button type="button" id="mode-btn">Set Mode</button>
+      </div>
+    </div>
+    <div style="margin-top:8px">
+      <span id="global-mode" style="font-weight:600"></span>
+      <span id="global-paused" style="font-weight:600;margin-left:15px"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Trading Blackouts</h2>
+    <p class="small">Schedule times when the system should NOT open new trades.</p>
+    <div class="row">
+      <label>Start (UTC HH:MM or ISO) <input id="bo-start" placeholder="14:00" /></label>
+      <label>End (UTC HH:MM or ISO) <input id="bo-end" placeholder="16:30" /></label>
+      <label>Reason <input id="bo-reason" placeholder="Prop firm restricted hours" /></label>
+      <label><input type="checkbox" id="bo-recurring" style="width:auto" checked /> Daily</label>
+      <div class="button-wrap"><button type="button" id="bo-add-btn">Add</button></div>
+    </div>
+    <table class="table" id="bo-table">
+      <thead><tr><th>Start</th><th>End</th><th>Reason</th><th>Type</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Account Configuration</h2>
+    {% if config.accounts %}
+    <table class="table">
+      <thead><tr><th>Name</th><th>Type</th><th>Login</th><th>Server</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+        {% for account in config.accounts %}
+        <tr>
+          <td>{{ account.name }}</td><td>{{ account.account_type }}</td>
+          <td>{{ account.login }}</td><td>{{ account.server[:40] }}...</td>
+          <td>{% if account.enabled %}<span style="color:#27ae60;font-weight:600">Enabled</span>{% else %}Disabled{% endif %}</td>
+          <td><a href="/accounts/remove?name={{ account.name }}">Remove</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="small">No accounts configured.</p>
+    {% endif %}
+    <details style="margin-top:10px">
+      <summary>Add Account</summary>
+      <form method="post" action="/accounts" style="margin-top:10px">
+        <div class="row">
+          <label>Name <input name="account_name" /></label>
+          <label>Type <select name="account_type"><option value="mt5">MT5</option><option value="dxtrade">DxTrade</option></select></label>
+          <label>Login <input name="account_login" /></label>
+        </div>
+        <div class="row">
+          <label>Password <input type="password" name="account_password" /></label>
+          <label>Server <input name="account_server" /></label>
+          <label>Terminal/API Key <input name="account_path" /></label>
+        </div>
+        <button type="submit">Save</button>
+      </form>
+    </details>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function pnlColor(v) {
+    if (v == null) return '--';
+    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
+  }
+
+  function platformBadge(type) {
+    const colors = { mt5: '#1f4b57', dxtrade: '#6a5acd' };
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[type]||'#888'};color:#fff;font-size:11px">${type.toUpperCase()}</span>`;
+  }
+
+  async function loadAccounts() {
+    const resp = await fetch('/api/accounts/status');
+    const d = await resp.json();
+    const accounts = d.accounts || [];
+    const container = document.getElementById('account-cards');
+
+    const mode = d.mode || 'paper';
+    document.getElementById('mode-select').value = mode;
+    document.getElementById('global-mode').innerHTML = mode === 'live'
+      ? 'Mode: <span style="color:#e74c3c">LIVE</span>'
+      : 'Mode: <span style="color:#888">Paper</span>';
+    document.getElementById('global-paused').innerHTML = d.paused
+      ? 'Trading: <span style="color:#e67e22">PAUSED</span>'
+      : 'Trading: <span style="color:#27ae60">Active</span>';
+
+    if (!accounts.length) {
+      container.innerHTML = '<section class="card"><p>No accounts configured.</p></section>';
+      return;
+    }
+
+    container.innerHTML = accounts.map(a => `
+      <section class="card" style="border-left: 4px solid ${a.connected ? '#27ae60' : '#e74c3c'}">
+        <h2>${platformBadge(a.type)} ${a.name}</h2>
+        <div class="status-grid">
+          <div class="status-item">
+            <span class="status-label">Connection</span>
+            <span class="status-value">${a.connected
+              ? '<span style="color:#27ae60;font-weight:600">Connected</span>'
+              : '<span style="color:#e74c3c">Disconnected</span>'}</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Balance</span>
+            <span class="status-value">${a.balance > 0 ? '$' + a.balance.toLocaleString(undefined, {minimumFractionDigits: 2}) : '--'}</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Equity</span>
+            <span class="status-value">${a.equity > 0 ? '$' + a.equity.toLocaleString(undefined, {minimumFractionDigits: 2}) : '--'}</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">Currency</span>
+            <span class="status-value">${a.currency || 'USD'}</span>
+          </div>
+        </div>
+        ${a.note ? `<p class="small" style="margin-top:8px">${a.note}</p>` : ''}
+        ${a.error ? `<p class="small" style="color:#e74c3c">${a.error}</p>` : ''}
+      </section>
+    `).join('');
+  }
+
+  async function loadPositions() {
+    const resp = await fetch('/api/accounts/positions');
+    // positions now shown on dashboard, not here
+  }
+
+  async function loadBlackouts() {
+    const resp = await fetch('/api/accounts/blackouts');
+    const d = await resp.json();
+    const tbody = document.querySelector('#bo-table tbody');
+    const blackouts = d.blackouts || [];
+    if (!blackouts.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="small">No blackouts.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    blackouts.forEach((b, idx) => {
+      const row = document.createElement('tr');
+      row.innerHTML = `<td>${b.start}</td><td>${b.end}</td><td>${b.reason||'--'}</td>
+        <td>${b.recurring ? 'Daily' : 'One-time'}</td>
+        <td><button onclick="removeBlackout(${idx})">Remove</button></td>`;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function removeBlackout(idx) {
+    await fetch('/api/accounts/blackouts/remove', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ index: idx }),
+    });
+    loadBlackouts();
+  }
+
+  document.getElementById('pause-btn').addEventListener('click', async () => {
+    await fetch('/api/accounts/pause', { method: 'POST' }); loadAccounts();
+  });
+  document.getElementById('resume-btn').addEventListener('click', async () => {
+    await fetch('/api/accounts/resume', { method: 'POST' }); loadAccounts();
+  });
+  document.getElementById('mode-btn').addEventListener('click', async () => {
+    const mode = document.getElementById('mode-select').value;
+    if (mode === 'live' && !confirm('Switch to LIVE trading with real money?')) return;
+    await fetch('/api/accounts/mode', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ mode }),
+    });
+    loadAccounts();
+  });
+  document.getElementById('bo-add-btn').addEventListener('click', async () => {
+    const s = document.getElementById('bo-start').value;
+    const e = document.getElementById('bo-end').value;
+    if (!s || !e) { alert('Start and end required'); return; }
+    await fetch('/api/accounts/blackouts', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ start: s, end: e, reason: document.getElementById('bo-reason').value,
+        recurring: document.getElementById('bo-recurring').checked }),
+    });
+    document.getElementById('bo-start').value = '';
+    document.getElementById('bo-end').value = '';
+    document.getElementById('bo-reason').value = '';
+    loadBlackouts();
+  });
+
+  loadAccounts();
+  loadBlackouts();
+  setInterval(loadAccounts, 30000);
+</script>
+{% endblock %}

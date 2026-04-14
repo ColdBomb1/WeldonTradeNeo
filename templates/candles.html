@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% set active_page = "candles" %}
+
+{% block title %}Candle Data — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Candle Data</h1>
+  <p>Browse stored OHLCV candle data collected from price feeds.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Collection Stats</h2>
+    <table class="table" id="stats-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Timeframe</th>
+          <th>Candles</th>
+          <th>Earliest</th>
+          <th>Latest</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="5" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>OHLCV Chart</h2>
+    <div class="toolbar">
+      <label>
+        Symbol
+        <select id="symbol-select">
+          {% for symbol in symbols %}
+          <option value="{{ symbol }}">{{ symbol }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframe
+        <select id="timeframe-select">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == "1h" %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Limit
+        <select id="limit-select">
+          <option value="100">100</option>
+          <option value="250">250</option>
+          <option value="500" selected>500</option>
+          <option value="1000">1000</option>
+          <option value="2000">2000</option>
+        </select>
+      </label>
+      <div class="button-wrap">
+        <button type="button" id="load-btn">Load</button>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="candle-chart"></canvas>
+    </div>
+    <p id="candle-count" class="small"></p>
+  </section>
+
+  <section class="card">
+    <h2>Data Table</h2>
+    <table class="table" id="candle-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Open</th>
+          <th>High</th>
+          <th>Low</th>
+          <th>Close</th>
+          <th>Volume</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let chartInstance = null;
+
+  async function loadStats() {
+    const resp = await fetch("/api/candles/stats");
+    const data = await resp.json();
+    const tbody = document.querySelector("#stats-table tbody");
+    tbody.innerHTML = "";
+    if (!data.stats || !data.stats.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="small">No candle data stored yet. The background collector will start populating data automatically.</td></tr>';
+      return;
+    }
+    data.stats.forEach(s => {
+      const row = document.createElement("tr");
+      row.innerHTML = `<td>${s.symbol}</td><td>${s.timeframe}</td><td>${s.count}</td><td>${s.earliest || "--"}</td><td>${s.latest || "--"}</td>`;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadCandles() {
+    const symbol = document.getElementById("symbol-select").value;
+    const timeframe = document.getElementById("timeframe-select").value;
+    const limit = document.getElementById("limit-select").value;
+
+    const resp = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&timeframe=${encodeURIComponent(timeframe)}&limit=${limit}`);
+    const data = await resp.json();
+    const candles = data.candles || [];
+
+    document.getElementById("candle-count").textContent = `Showing ${candles.length} candles for ${symbol} / ${timeframe}`;
+
+    // Chart
+    const ctx = document.getElementById("candle-chart").getContext("2d");
+    if (chartInstance) chartInstance.destroy();
+
+    chartInstance = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: candles.map(c => c.time),
+        datasets: [
+          { label: "Close", data: candles.map(c => c.close), borderColor: "#1f4b57", backgroundColor: "rgba(31,75,87,0.1)", tension: 0.2, pointRadius: 0, fill: true },
+          { label: "High", data: candles.map(c => c.high), borderColor: "rgba(39,174,96,0.4)", borderWidth: 1, pointRadius: 0, tension: 0.2, fill: false },
+          { label: "Low", data: candles.map(c => c.low), borderColor: "rgba(231,76,60,0.4)", borderWidth: 1, pointRadius: 0, tension: 0.2, fill: false },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { x: { ticks: { maxTicksLimit: 10 } } },
+      },
+    });
+
+    // Table (last 50)
+    const tbody = document.querySelector("#candle-table tbody");
+    tbody.innerHTML = "";
+    candles.slice(-50).reverse().forEach(c => {
+      const row = document.createElement("tr");
+      row.innerHTML = `<td>${c.time}</td><td>${c.open?.toFixed(6) ?? "--"}</td><td>${c.high?.toFixed(6) ?? "--"}</td><td>${c.low?.toFixed(6) ?? "--"}</td><td>${c.close?.toFixed(6) ?? "--"}</td><td>${c.volume != null ? c.volume.toLocaleString() : "--"}</td>`;
+      tbody.appendChild(row);
+    });
+  }
+
+  document.getElementById("load-btn").addEventListener("click", loadCandles);
+
+  loadStats();
+  loadCandles();
+</script>
+{% endblock %}

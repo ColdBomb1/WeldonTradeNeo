@@ -1,0 +1,290 @@
+{% extends "base.html" %}
+{% set active_page = "analytics" %}
+
+{% block title %}Analytics — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Performance Analytics</h1>
+  <p>Track live trading performance, strategy rankings, and risk exposure.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Equity Curve</h2>
+    <div class="chart-wrap">
+      <canvas id="equity-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Daily P&L</h2>
+    <div class="chart-wrap">
+      <canvas id="daily-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Strategy Scorecard</h2>
+    <table class="table" id="strategy-table">
+      <thead>
+        <tr>
+          <th>Strategy</th>
+          <th>Trades</th>
+          <th>Win Rate</th>
+          <th>P&L</th>
+          <th>PF</th>
+          <th>Max DD</th>
+          <th>Avg P&L</th>
+          <th>High Conf Acc</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="8" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Symbol Breakdown</h2>
+    <table class="table" id="symbol-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Trades</th>
+          <th>Wins</th>
+          <th>Win Rate</th>
+          <th>P&L</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="5" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Risk Exposure</h2>
+    <div class="status-grid" id="risk-grid">
+      <div class="status-item">
+        <span class="status-label">Open Positions</span>
+        <span class="status-value" id="r-positions">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Total Volume</span>
+        <span class="status-value" id="r-volume">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Unrealized P&L</span>
+        <span class="status-value" id="r-unrealized">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Circuit Breaker</span>
+        <span class="status-value" id="r-cb">--</span>
+      </div>
+    </div>
+    <div id="correlation-warnings" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>Claude Performance Review</h2>
+    <button type="button" id="review-btn">Run Claude Review</button>
+    <div id="review-output" style="margin-top:10px;white-space:pre-wrap;font-size:14px"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let equityChart = null, dailyChart = null;
+
+  function pnlColor(val) {
+    if (val == null) return '--';
+    const color = val >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${color}">$${val.toFixed(2)}</span>`;
+  }
+
+  function pctColor(val) {
+    if (val == null) return '--';
+    const color = val >= 0.5 ? '#27ae60' : val >= 0.4 ? '#e67e22' : '#e74c3c';
+    return `<span style="color:${color}">${(val * 100).toFixed(1)}%</span>`;
+  }
+
+  async function loadEquityCurve() {
+    const resp = await fetch('/api/analytics/equity-curve');
+    const data = await resp.json();
+    const curve = data.curve || [];
+    if (!curve.length) return;
+
+    const ctx = document.getElementById('equity-chart').getContext('2d');
+    if (equityChart) equityChart.destroy();
+    equityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: curve.map(p => new Date(p.time).toLocaleDateString()),
+        datasets: [{
+          label: 'Cumulative P&L',
+          data: curve.map(p => p.pnl),
+          borderColor: '#1f4b57',
+          backgroundColor: 'rgba(31,75,87,0.1)',
+          tension: 0.2,
+          pointRadius: 2,
+          fill: true,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { x: { ticks: { maxTicksLimit: 12 } } },
+      }
+    });
+  }
+
+  async function loadDailyPnl() {
+    const resp = await fetch('/api/analytics/daily-pnl?days=30');
+    const data = await resp.json();
+    const daily = data.daily_pnl || [];
+    if (!daily.length) return;
+
+    const ctx = document.getElementById('daily-chart').getContext('2d');
+    if (dailyChart) dailyChart.destroy();
+    dailyChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels: daily.map(d => d.date),
+        datasets: [{
+          label: 'Daily P&L',
+          data: daily.map(d => d.pnl),
+          backgroundColor: daily.map(d => d.pnl >= 0 ? '#27ae60' : '#e74c3c'),
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { x: { ticks: { maxTicksLimit: 15 } } },
+      }
+    });
+  }
+
+  async function loadStrategies() {
+    const resp = await fetch('/api/analytics/strategies');
+    const data = await resp.json();
+    const tbody = document.querySelector('#strategy-table tbody');
+    tbody.innerHTML = '';
+    const strategies = data.strategies || [];
+    if (!strategies.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No closed trades yet.</td></tr>';
+      return;
+    }
+    strategies.forEach(s => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td><strong>${s.strategy}</strong></td>
+        <td>${s.trades}</td>
+        <td>${pctColor(s.win_rate)}</td>
+        <td>${pnlColor(s.total_pnl)}</td>
+        <td>${s.profit_factor}</td>
+        <td>${pnlColor(-s.max_drawdown)}</td>
+        <td>${pnlColor(s.avg_pnl)}</td>
+        <td>${s.high_conf_accuracy != null ? pctColor(s.high_conf_accuracy) : '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadSymbols() {
+    const resp = await fetch('/api/analytics/symbols');
+    const data = await resp.json();
+    const tbody = document.querySelector('#symbol-table tbody');
+    tbody.innerHTML = '';
+    const symbols = data.symbols || [];
+    if (!symbols.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="small">No closed trades yet.</td></tr>';
+      return;
+    }
+    symbols.forEach(s => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td><strong>${s.symbol}</strong></td>
+        <td>${s.trades}</td>
+        <td>${s.wins}</td>
+        <td>${pctColor(s.win_rate)}</td>
+        <td>${pnlColor(s.pnl)}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadRisk() {
+    const resp = await fetch('/api/analytics/risk');
+    const data = await resp.json();
+    const exp = data.exposure || {};
+    document.getElementById('r-positions').textContent = exp.total_positions || 0;
+    document.getElementById('r-volume').textContent = exp.total_volume || 0;
+    document.getElementById('r-unrealized').innerHTML = pnlColor(exp.total_unrealized_pnl || 0);
+
+    const cb = data.circuit_breaker || {};
+    const cbEl = document.getElementById('r-cb');
+    if (cb.ok) {
+      cbEl.innerHTML = '<span style="color:#27ae60;font-weight:600">OK</span>';
+    } else {
+      cbEl.innerHTML = `<span style="color:#e74c3c;font-weight:600">TRIPPED</span>`;
+      cbEl.title = cb.reason;
+    }
+
+    const warnEl = document.getElementById('correlation-warnings');
+    const warnings = data.correlation_warnings || [];
+    if (warnings.length) {
+      warnEl.innerHTML = '<strong>Correlation warnings:</strong><br>' + warnings.map(w =>
+        `<span style="color:#e67e22">- ${w}</span>`
+      ).join('<br>');
+    } else {
+      warnEl.innerHTML = '';
+    }
+  }
+
+  document.getElementById('review-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('review-btn');
+    const output = document.getElementById('review-output');
+    btn.disabled = true;
+    btn.textContent = 'Analyzing...';
+    output.textContent = '';
+
+    const resp = await fetch('/api/analytics/claude-review', { method: 'POST' });
+    const data = await resp.json();
+    btn.disabled = false;
+    btn.textContent = 'Run Claude Review';
+
+    if (data.error) {
+      output.textContent = 'Error: ' + data.error;
+      return;
+    }
+
+    const a = data.analysis || {};
+    let text = '';
+    if (a.summary) text += 'Summary: ' + a.summary + '\n\n';
+    if (a.strong_strategies && a.strong_strategies.length)
+      text += 'Strong: ' + a.strong_strategies.join(', ') + '\n';
+    if (a.degraded_strategies && a.degraded_strategies.length)
+      text += 'Degraded: ' + a.degraded_strategies.join(', ') + '\n';
+    if (a.recommendations) {
+      text += '\nRecommendations:\n';
+      a.recommendations.forEach(r => {
+        text += `  [${r.action}] ${r.strategy}: ${r.reason}\n`;
+      });
+    }
+    if (a.confidence_calibration)
+      text += '\nConfidence calibration: ' + a.confidence_calibration + '\n';
+    output.textContent = text || JSON.stringify(a, null, 2);
+  });
+
+  loadEquityCurve();
+  loadDailyPnl();
+  loadStrategies();
+  loadSymbols();
+  loadRisk();
+</script>
+{% endblock %}

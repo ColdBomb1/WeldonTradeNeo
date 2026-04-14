@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% set active_page = "trades" %}
+
+{% block title %}Live Trades — WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Live Trades</h1>
+  <p>Execution mode: <strong>{{ execution_mode }}</strong></p>
+</header>
+<main>
+  <section class="card">
+    <h2>Summary</h2>
+    <div class="status-grid" id="summary-grid">
+      <div class="status-item">
+        <span class="status-label">Open Positions</span>
+        <span class="status-value" id="s-open">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Unrealized P&L</span>
+        <span class="status-value" id="s-unrealized">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Today P&L</span>
+        <span class="status-value" id="s-daily">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Win Rate</span>
+        <span class="status-value" id="s-winrate">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Total P&L</span>
+        <span class="status-value" id="s-total">--</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">Total Trades</span>
+        <span class="status-value" id="s-count">--</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Open Positions</h2>
+    <table class="table" id="open-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Volume</th>
+          <th>Entry</th>
+          <th>Current</th>
+          <th>SL</th>
+          <th>TP</th>
+          <th>P&L</th>
+          <th>Platform</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="11" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Trade History</h2>
+    <div class="toolbar">
+      <label>
+        Symbol
+        <select id="filter-symbol">
+          <option value="">All</option>
+          {% for s in symbols %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <table class="table" id="history-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Opened</th>
+          <th>Closed</th>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Volume</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>P&L</th>
+          <th>Exit Type</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function pnlColor(val) {
+    if (val == null) return '--';
+    const color = val >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${color}">$${val.toFixed(2)}</span>`;
+  }
+
+  function sideBadge(side) {
+    const color = side === 'buy' ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${color}">${side.toUpperCase()}</span>`;
+  }
+
+  async function loadSummary() {
+    const resp = await fetch('/api/trades/summary');
+    const d = await resp.json();
+    document.getElementById('s-open').textContent = d.open_positions;
+    document.getElementById('s-unrealized').innerHTML = pnlColor(d.unrealized_pnl);
+    document.getElementById('s-daily').innerHTML = pnlColor(d.daily_pnl);
+    document.getElementById('s-winrate').textContent = (d.win_rate * 100).toFixed(1) + '%';
+    document.getElementById('s-total').innerHTML = pnlColor(d.total_pnl);
+    document.getElementById('s-count').textContent = d.total_trades;
+  }
+
+  async function loadOpenTrades() {
+    const resp = await fetch('/api/trades?status=open');
+    const data = await resp.json();
+    const tbody = document.querySelector('#open-table tbody');
+    tbody.innerHTML = '';
+
+    if (!data.trades || !data.trades.length) {
+      tbody.innerHTML = '<tr><td colspan="11" class="small">No open positions.</td></tr>';
+      return;
+    }
+
+    data.trades.forEach(t => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${t.id}</td>
+        <td>${t.symbol}</td>
+        <td>${sideBadge(t.side)}</td>
+        <td>${t.volume}</td>
+        <td>${t.entry_price?.toFixed(5) ?? '--'}</td>
+        <td>${t.current_price?.toFixed(5) ?? '--'}</td>
+        <td>${t.stop_loss?.toFixed(5) ?? '--'}</td>
+        <td>${t.take_profit?.toFixed(5) ?? '--'}</td>
+        <td>${pnlColor(t.pnl)}</td>
+        <td>${t.platform}</td>
+        <td><button onclick="closeTrade(${t.id})">Close</button></td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadHistory() {
+    const symbol = document.getElementById('filter-symbol').value;
+    let url = '/api/trades?status=closed&limit=50';
+    if (symbol) url += `&symbol=${encodeURIComponent(symbol)}`;
+
+    const resp = await fetch(url);
+    const data = await resp.json();
+    const tbody = document.querySelector('#history-table tbody');
+    tbody.innerHTML = '';
+
+    if (!data.trades || !data.trades.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="small">No closed trades yet.</td></tr>';
+      return;
+    }
+
+    data.trades.forEach(t => {
+      const row = document.createElement('tr');
+      const opened = t.opened_at ? new Date(t.opened_at).toLocaleString() : '--';
+      const closed = t.closed_at ? new Date(t.closed_at).toLocaleString() : '--';
+      row.innerHTML = `
+        <td>${t.id}</td>
+        <td>${opened}</td>
+        <td>${closed}</td>
+        <td>${t.symbol}</td>
+        <td>${sideBadge(t.side)}</td>
+        <td>${t.volume}</td>
+        <td>${t.entry_price?.toFixed(5) ?? '--'}</td>
+        <td>${t.exit_price?.toFixed(5) ?? '--'}</td>
+        <td>${pnlColor(t.pnl)}</td>
+        <td>${t.exit_type || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function closeTrade(id) {
+    if (!confirm('Close this trade?')) return;
+    const resp = await fetch(`/api/trades/${id}/close`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) alert('Error: ' + data.error);
+    loadAll();
+  }
+
+  function loadAll() {
+    loadSummary();
+    loadOpenTrades();
+    loadHistory();
+  }
+
+  document.getElementById('filter-symbol').addEventListener('change', loadHistory);
+
+  loadAll();
+  setInterval(loadAll, 10000);
+</script>
+{% endblock %}

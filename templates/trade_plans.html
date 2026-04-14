@@ -1,0 +1,835 @@
+{% extends "base.html" %}
+{% set active_page = "trade_plans" %}
+
+{% block title %}Trade Plans — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Trade Plans</h1>
+  <p>Create trading strategies and run backtests against historical candle data.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Create New Trade Plan</h2>
+    <div class="row">
+      <label>
+        Name
+        <input id="plan-name" placeholder="My SMA Crossover" />
+      </label>
+      <label>
+        Symbol
+        <select id="plan-symbol">
+          {% for s in symbols %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Strategy
+        <select id="plan-strategy" onchange="updateParamFields()">
+          {% for s in strategies %}
+          <option value="{{ s.name }}">{{ s.name }} — {{ s.description }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div id="param-fields" class="row"></div>
+    <button type="button" onclick="createPlan()">Create Plan</button>
+    <p id="create-msg" class="small"></p>
+  </section>
+
+  <section class="card">
+    <h2>Existing Plans</h2>
+    <table class="table" id="plans-table">
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Symbol</th>
+          <th>Strategy</th>
+          <th>Status</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for plan in plans %}
+        <tr>
+          <td>{{ plan.name }}</td>
+          <td>{{ plan.symbol }}</td>
+          <td>{{ plan.strategy_type }}</td>
+          <td><span class="badge {% if plan.status == 'active' %}badge-success{% elif plan.status == 'draft' %}badge-warning{% else %}badge-neutral{% endif %}">{{ plan.status }}</span></td>
+          <td>{{ plan.created_at.strftime('%Y-%m-%d %H:%M') if plan.created_at else '--' }}</td>
+          <td>
+            <button class="btn btn-sm btn-outline" onclick="showBacktestModal({{ plan.id }}, '{{ plan.symbol }}')">Backtest</button>
+            <button class="btn btn-sm btn-danger" onclick="deletePlan({{ plan.id }})">Delete</button>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if not plans %}
+        <tr><td colspan="6" class="small">No trade plans yet. Create one above.</td></tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Backtest Modal -->
+  <section class="card hidden" id="backtest-section">
+    <h2>Run Backtest</h2>
+    <div class="row">
+      <label>
+        Timeframe
+        <select id="bt-timeframe">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == "1h" %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Start Date
+        <input type="date" id="bt-start" value="2024-01-01" />
+      </label>
+      <label>
+        End Date
+        <input type="date" id="bt-end" />
+      </label>
+      <label>
+        Initial Balance
+        <input type="number" id="bt-balance" value="10000" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Lot Type
+        <select id="bt-lot-type">
+          <option value="micro">Micro (1K)</option>
+          <option value="mini" selected>Mini (10K)</option>
+          <option value="standard">Standard (100K)</option>
+        </select>
+      </label>
+      <label>
+        Risk Per Trade %
+        <input type="number" id="bt-risk-pct" value="1.0" step="0.1" min="0.1" max="10" />
+      </label>
+      <label>
+        SL ATR Mult.
+        <input type="number" id="bt-sl-atr" value="1.5" step="0.1" min="0.5" max="5" />
+      </label>
+      <label>
+        TP ATR Mult.
+        <input type="number" id="bt-tp-atr" value="2.0" step="0.1" min="0.5" max="10" />
+      </label>
+      <label>
+        Monthly Max Loss %
+        <input type="number" id="bt-monthly-loss" value="7.0" step="0.5" min="1" max="20" />
+      </label>
+    </div>
+    <button type="button" onclick="runBacktest()">Run Backtest</button>
+    <p id="bt-msg" class="small"></p>
+  </section>
+
+  <!-- Parameter Optimizer -->
+  <section class="card">
+    <h2>Parameter Optimizer</h2>
+    <p class="small">Grid-search hundreds of parameter combinations locally to find profitable configurations. No API calls needed.</p>
+    <div class="row">
+      <label>
+        Symbol
+        <select id="opt-symbol">
+          {% for s in symbols %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Strategy
+        <select id="opt-strategy">
+          {% for s in strategies %}
+          <option value="{{ s.name }}">{{ s.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframe
+        <select id="opt-timeframe">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == "1h" %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Start Date
+        <input type="date" id="opt-start" value="2024-01-01" />
+      </label>
+      <label>
+        End Date
+        <input type="date" id="opt-end" />
+      </label>
+      <label>
+        Rank By
+        <select id="opt-rank">
+          <option value="sharpe_ratio" selected>Sharpe Ratio</option>
+          <option value="profit_factor">Profit Factor</option>
+          <option value="win_rate">Win Rate</option>
+          <option value="final_balance">Final Balance</option>
+          <option value="avg_monthly_return">Avg Monthly Return</option>
+        </select>
+      </label>
+      <label>
+        Initial Balance
+        <input type="number" id="opt-balance" value="10000" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Lot Type
+        <select id="opt-lot-type">
+          <option value="micro">Micro (1K)</option>
+          <option value="mini" selected>Mini (10K)</option>
+          <option value="standard">Standard (100K)</option>
+        </select>
+      </label>
+      <label>
+        Risk Per Trade %
+        <input type="number" id="opt-risk-pct" value="1.0" step="0.1" min="0.1" max="10" />
+      </label>
+      <label>
+        SL ATR Mult.
+        <input type="number" id="opt-sl-atr" value="1.5" step="0.1" min="0.5" max="5" />
+      </label>
+      <label>
+        TP ATR Mult.
+        <input type="number" id="opt-tp-atr" value="2.0" step="0.1" min="0.5" max="10" />
+      </label>
+      <label>
+        Monthly Max Loss %
+        <input type="number" id="opt-monthly-loss" value="7.0" step="0.5" min="1" max="20" />
+      </label>
+    </div>
+    <button type="button" id="opt-run-btn" onclick="runOptimizer()">Run Optimizer</button>
+    <button type="button" id="opt-stop-btn" class="btn-sm btn-danger hidden" onclick="stopOptimizer()">Stop</button>
+    <p id="opt-msg" class="small"></p>
+
+    <!-- Optimizer Results -->
+    <div id="opt-results" class="hidden" style="margin-top: 16px;">
+      <h3>Top Results</h3>
+      <table class="table" id="opt-results-table">
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Parameters</th>
+            <th>Balance</th>
+            <th>Trades</th>
+            <th>Win Rate</th>
+            <th>Max DD</th>
+            <th>PF</th>
+            <th>Sharpe</th>
+            <th>Avg Mo.</th>
+            <th>Mo. DD</th>
+            <th>Mo.>5%</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <h3 style="margin-top: 16px;">Export for Claude Analysis</h3>
+      <p class="small">Copy the text below and paste it into a Claude conversation for AI-powered strategy analysis — no API cost.</p>
+      <textarea id="opt-export" readonly style="min-height: 200px; font-family: monospace; font-size: 12px;"></textarea>
+      <button type="button" onclick="copyExport()" class="btn-sm" style="margin-top: 8px;">Copy to Clipboard</button>
+    </div>
+  </section>
+
+  <!-- Claude-in-the-Loop Workflow -->
+  <section class="card">
+    <h2>Claude Strategy Advisor</h2>
+    <p class="small">Three-step AI workflow: (1) Generate context prompt, (2) Paste into Claude &amp; get suggestions, (3) Run optimizer on those suggestions and get review feedback. Zero API cost — uses your Claude Pro subscription.</p>
+
+    <!-- Step 1: Generate Prompt -->
+    <h3>Step 1 — Generate Context Prompt</h3>
+    <div class="row">
+      <label>
+        Symbol
+        <select id="cw-symbol">
+          {% for s in symbols %}
+          <option value="{{ s }}">{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Timeframe
+        <select id="cw-timeframe">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == "1h" %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>
+        Start Date
+        <input type="date" id="cw-start" value="2024-01-01" />
+      </label>
+      <label>
+        End Date
+        <input type="date" id="cw-end" />
+      </label>
+    </div>
+    <button type="button" onclick="generateClaudePrompt()">Generate Prompt</button>
+    <p id="cw-step1-msg" class="small"></p>
+
+    <div id="cw-prompt-area" class="hidden" style="margin-top: 12px;">
+      <textarea id="cw-prompt" readonly style="min-height: 250px; font-family: monospace; font-size: 12px;"></textarea>
+      <button type="button" onclick="copyField('cw-prompt')" class="btn-sm" style="margin-top: 8px;">Copy to Clipboard</button>
+    </div>
+
+    <!-- Step 2: Paste Claude's Response -->
+    <div id="cw-step2" class="hidden" style="margin-top: 24px;">
+      <h3>Step 2 — Paste Claude's Response</h3>
+      <p class="small">Copy the prompt above into a Claude conversation. After Claude responds with strategy suggestions, paste the full response below.</p>
+      <textarea id="cw-claude-response" placeholder="Paste Claude's full response here (including the JSON array)..." style="min-height: 200px; font-family: monospace; font-size: 12px;"></textarea>
+      <div class="row" style="margin-top: 8px;">
+        <label>
+          Rank By
+          <select id="cw-rank">
+            <option value="sharpe_ratio" selected>Sharpe Ratio</option>
+            <option value="profit_factor">Profit Factor</option>
+            <option value="win_rate">Win Rate</option>
+            <option value="final_balance">Final Balance</option>
+            <option value="avg_monthly_return">Avg Monthly Return</option>
+          </select>
+        </label>
+        <label>
+          Initial Balance
+          <input type="number" id="cw-balance" value="10000" />
+        </label>
+        <label>
+          Lot Type
+          <select id="cw-lot-type">
+            <option value="micro">Micro (1K)</option>
+            <option value="mini" selected>Mini (10K)</option>
+            <option value="standard">Standard (100K)</option>
+          </select>
+        </label>
+        <label>
+          Risk %
+          <input type="number" id="cw-risk-pct" value="1.0" step="0.1" min="0.1" max="10" />
+        </label>
+      </div>
+      <div class="row" style="margin-top: 8px;">
+        <label>
+          SL ATR Mult.
+          <input type="number" id="cw-sl-atr" value="1.5" step="0.1" min="0.5" max="5" />
+        </label>
+        <label>
+          TP ATR Mult.
+          <input type="number" id="cw-tp-atr" value="2.0" step="0.1" min="0.5" max="10" />
+        </label>
+        <label>
+          Monthly Max Loss %
+          <input type="number" id="cw-monthly-loss" value="7.0" step="0.5" min="1" max="20" />
+        </label>
+      </div>
+      <button type="button" id="cw-run-btn" onclick="runClaudeSuggestions()">Run Optimizer on Suggestions</button>
+      <button type="button" id="cw-stop-btn" class="btn-sm btn-danger hidden" onclick="stopOptimizer()">Stop</button>
+      <p id="cw-step2-msg" class="small"></p>
+    </div>
+
+    <!-- Step 3: Results + Review Prompt -->
+    <div id="cw-step3" class="hidden" style="margin-top: 24px;">
+      <h3>Step 3 — Results &amp; Review</h3>
+      <div id="cw-results-container"></div>
+
+      <h3 style="margin-top: 16px;">Review Prompt for Claude</h3>
+      <p class="small">Copy and paste back into your Claude conversation for analysis and refined suggestions.</p>
+      <textarea id="cw-review-prompt" readonly style="min-height: 250px; font-family: monospace; font-size: 12px;"></textarea>
+      <button type="button" onclick="copyField('cw-review-prompt')" class="btn-sm" style="margin-top: 8px;">Copy Review Prompt</button>
+
+      <div style="margin-top: 16px;">
+        <button type="button" onclick="startNextIteration()" class="btn-sm">Start Next Iteration (paste refined suggestions)</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Backtest Results -->
+  <section class="card hidden" id="results-section">
+    <h2>Backtest Results</h2>
+    <div class="metrics-grid" id="metrics-grid"></div>
+    <div class="chart-wrap-small">
+      <canvas id="equity-chart"></canvas>
+    </div>
+
+    <!-- Monthly P&L -->
+    <div id="monthly-pnl-section" class="hidden" style="margin-top: 16px;">
+      <h3>Monthly P&L</h3>
+      <table class="table" id="monthly-pnl-table">
+        <thead>
+          <tr>
+            <th>Month</th>
+            <th>Start Balance</th>
+            <th>P&L</th>
+            <th>Return %</th>
+            <th>Trades</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <h3>Trade Log</h3>
+    <table class="table" id="trades-table">
+      <thead>
+        <tr>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Exit</th>
+          <th>SL</th>
+          <th>TP</th>
+          <th>Lots</th>
+          <th>Exit Type</th>
+          <th>P&L</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  const strategies = {{ strategies | tojson }};
+  let currentPlanId = null;
+  let equityChartInstance = null;
+
+  function updateParamFields() {
+    const stratName = document.getElementById("plan-strategy").value;
+    const strat = strategies.find(s => s.name === stratName);
+    const container = document.getElementById("param-fields");
+    container.innerHTML = "";
+    if (!strat) return;
+    strat.params.forEach(p => {
+      const label = document.createElement("label");
+      label.textContent = p.label;
+      const input = document.createElement("input");
+      input.type = p.type === "float" ? "number" : "number";
+      input.step = p.type === "float" ? "0.1" : "1";
+      input.id = `param-${p.name}`;
+      input.value = p.default;
+      label.appendChild(input);
+      container.appendChild(label);
+    });
+  }
+
+  async function createPlan() {
+    const stratName = document.getElementById("plan-strategy").value;
+    const strat = strategies.find(s => s.name === stratName);
+    const params = {};
+    if (strat) {
+      strat.params.forEach(p => {
+        const el = document.getElementById(`param-${p.name}`);
+        params[p.name] = p.type === "float" ? parseFloat(el.value) : parseInt(el.value);
+      });
+    }
+
+    const resp = await fetch("/api/trade-plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: document.getElementById("plan-name").value || "Untitled",
+        symbol: document.getElementById("plan-symbol").value,
+        strategy_type: stratName,
+        parameters: params,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      document.getElementById("create-msg").textContent = `Plan created (ID: ${data.id}). Refreshing...`;
+      setTimeout(() => location.reload(), 800);
+    } else {
+      document.getElementById("create-msg").textContent = data.error || "Failed to create plan.";
+    }
+  }
+
+  async function deletePlan(planId) {
+    if (!confirm("Delete this trade plan and all its backtests?")) return;
+    await fetch(`/api/trade-plans/${planId}`, { method: "DELETE" });
+    location.reload();
+  }
+
+  function showBacktestModal(planId, symbol) {
+    currentPlanId = planId;
+    document.getElementById("backtest-section").classList.remove("hidden");
+    document.getElementById("bt-end").value = new Date().toISOString().split("T")[0];
+    document.getElementById("bt-msg").textContent = `Backtesting plan #${planId} on ${symbol}`;
+    document.getElementById("backtest-section").scrollIntoView({ behavior: "smooth" });
+  }
+
+  async function runBacktest() {
+    if (!currentPlanId) return;
+    const msg = document.getElementById("bt-msg");
+    msg.textContent = "Running backtest...";
+
+    const resp = await fetch(`/api/trade-plans/${currentPlanId}/backtest`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        timeframe: document.getElementById("bt-timeframe").value,
+        start_date: document.getElementById("bt-start").value + "T00:00:00+00:00",
+        end_date: document.getElementById("bt-end").value + "T23:59:59+00:00",
+        initial_balance: parseFloat(document.getElementById("bt-balance").value),
+        lot_type: document.getElementById("bt-lot-type").value,
+        risk_per_trade_pct: parseFloat(document.getElementById("bt-risk-pct").value),
+        sl_atr_multiplier: parseFloat(document.getElementById("bt-sl-atr").value),
+        tp_atr_multiplier: parseFloat(document.getElementById("bt-tp-atr").value),
+        monthly_max_loss_pct: parseFloat(document.getElementById("bt-monthly-loss").value),
+      }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      msg.textContent = `Error: ${data.error}`;
+      return;
+    }
+
+    msg.textContent = `Backtest completed (Run ID: ${data.run_id}).`;
+
+    // Fetch full results
+    const fullResp = await fetch(`/api/trade-plans/${currentPlanId}/backtests/${data.run_id}`);
+    const full = await fullResp.json();
+    showResults(full);
+  }
+
+  function showResults(bt) {
+    const section = document.getElementById("results-section");
+    section.classList.remove("hidden");
+
+    // Metrics
+    const grid = document.getElementById("metrics-grid");
+    const metrics = [
+      { label: "Final Balance", value: `$${bt.final_balance?.toLocaleString() ?? "--"}` },
+      { label: "Total Trades", value: bt.total_trades ?? "--" },
+      { label: "Win Rate", value: bt.win_rate != null ? `${(bt.win_rate * 100).toFixed(1)}%` : "--" },
+      { label: "Max Drawdown", value: bt.max_drawdown != null ? `${(bt.max_drawdown * 100).toFixed(1)}%` : "--" },
+      { label: "Profit Factor", value: bt.profit_factor?.toFixed(2) ?? "--" },
+      { label: "Sharpe Ratio", value: bt.sharpe_ratio?.toFixed(2) ?? "--" },
+    ];
+    grid.innerHTML = metrics.map(m =>
+      `<div class="metric-card"><div class="metric-value">${m.value}</div><div class="metric-label">${m.label}</div></div>`
+    ).join("");
+
+    // Equity curve
+    const curve = bt.equity_curve || [];
+    const ctx = document.getElementById("equity-chart").getContext("2d");
+    if (equityChartInstance) equityChartInstance.destroy();
+    equityChartInstance = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: curve.map(p => p.time),
+        datasets: [{
+          label: "Equity",
+          data: curve.map(p => p.equity),
+          borderColor: "#1f4b57",
+          backgroundColor: "rgba(31,75,87,0.1)",
+          tension: 0.2,
+          pointRadius: 0,
+          fill: true,
+        }],
+      },
+      options: { responsive: true, maintainAspectRatio: false, scales: { x: { ticks: { maxTicksLimit: 8 } } } },
+    });
+
+    // Monthly P&L table (from results.monthly_pnl if present)
+    const monthlyPnl = bt.results?.monthly_pnl || bt.monthly_pnl || [];
+    const monthlySection = document.getElementById("monthly-pnl-section");
+    if (monthlyPnl.length > 0) {
+      monthlySection.classList.remove("hidden");
+      const mtbody = document.querySelector("#monthly-pnl-table tbody");
+      mtbody.innerHTML = "";
+      monthlyPnl.forEach(m => {
+        const row = document.createElement("tr");
+        const pctClass = m.pct > 0 ? "badge-success" : m.pct < 0 ? "badge-danger" : "badge-neutral";
+        row.innerHTML = `
+          <td>${m.month}</td>
+          <td>$${m.start_balance?.toLocaleString() ?? "--"}</td>
+          <td><span class="badge ${m.pnl > 0 ? "badge-success" : m.pnl < 0 ? "badge-danger" : "badge-neutral"}">$${m.pnl?.toFixed(2)}</span></td>
+          <td><span class="badge ${pctClass}">${m.pct?.toFixed(1)}%</span></td>
+          <td>${m.trades}</td>
+        `;
+        mtbody.appendChild(row);
+      });
+    } else {
+      monthlySection.classList.add("hidden");
+    }
+
+    // Trades table
+    const trades = bt.trades || [];
+    const tbody = document.querySelector("#trades-table tbody");
+    tbody.innerHTML = "";
+    trades.forEach(t => {
+      const row = document.createElement("tr");
+      const pnlClass = t.pnl > 0 ? "badge-success" : t.pnl < 0 ? "badge-danger" : "badge-neutral";
+      const exitBadge = t.exit_type === "sl" ? "badge-danger" : t.exit_type === "tp" ? "badge-success" : "badge-neutral";
+      row.innerHTML = `
+        <td style="font-size:11px">${t.entry_ts}</td>
+        <td style="font-size:11px">${t.exit_ts}</td>
+        <td>${t.side}</td>
+        <td>${t.entry_price?.toFixed(5)}</td>
+        <td>${t.exit_price?.toFixed(5)}</td>
+        <td>${t.stop_loss?.toFixed(5) ?? "--"}</td>
+        <td>${t.take_profit?.toFixed(5) ?? "--"}</td>
+        <td>${t.volume}</td>
+        <td><span class="badge ${exitBadge}">${t.exit_type ?? "--"}</span></td>
+        <td><span class="badge ${pnlClass}">$${t.pnl?.toFixed(2)}</span></td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    section.scrollIntoView({ behavior: "smooth" });
+  }
+
+  // --- Optimizer ---
+
+  async function stopOptimizer() {
+    await fetch("/api/optimizer/stop", { method: "POST" });
+    document.getElementById("opt-stop-btn").classList.add("hidden");
+    document.getElementById("cw-stop-btn").classList.add("hidden");
+  }
+
+  async function runOptimizer() {
+    const msg = document.getElementById("opt-msg");
+    msg.textContent = "Running optimization — this may take a moment...";
+    document.getElementById("opt-stop-btn").classList.remove("hidden");
+
+    const endDate = document.getElementById("opt-end").value || new Date().toISOString().split("T")[0];
+
+    const resp = await fetch("/api/optimizer/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: document.getElementById("opt-symbol").value,
+        strategy_type: document.getElementById("opt-strategy").value,
+        timeframe: document.getElementById("opt-timeframe").value,
+        start_date: document.getElementById("opt-start").value + "T00:00:00+00:00",
+        end_date: endDate + "T23:59:59+00:00",
+        initial_balance: parseFloat(document.getElementById("opt-balance").value),
+        rank_by: document.getElementById("opt-rank").value,
+        top_n: 10,
+        lot_type: document.getElementById("opt-lot-type").value,
+        risk_per_trade_pct: parseFloat(document.getElementById("opt-risk-pct").value),
+        sl_atr_multiplier: parseFloat(document.getElementById("opt-sl-atr").value),
+        tp_atr_multiplier: parseFloat(document.getElementById("opt-tp-atr").value),
+        monthly_max_loss_pct: parseFloat(document.getElementById("opt-monthly-loss").value),
+      }),
+    });
+    const data = await resp.json();
+    document.getElementById("opt-stop-btn").classList.add("hidden");
+
+    if (data.error) {
+      msg.textContent = `Error: ${data.error}`;
+      return;
+    }
+
+    const results = data.results || [];
+    msg.textContent = `Optimization complete: tested combinations on ${data.candle_count} candles, found ${results.length} profitable configurations.`;
+
+    // Show results
+    document.getElementById("opt-results").classList.remove("hidden");
+
+    const tbody = document.querySelector("#opt-results-table tbody");
+    tbody.innerHTML = "";
+    results.forEach(r => {
+      const paramStr = Object.entries(r.parameters).map(([k,v]) => `${k}=${v}`).join(", ");
+      const row = document.createElement("tr");
+      const moClass = (r.avg_monthly_return || 0) >= 5 ? "badge-success" : (r.avg_monthly_return || 0) > 0 ? "badge-warning" : "badge-danger";
+      row.innerHTML = `
+        <td>${r.rank}</td>
+        <td style="font-size: 12px;">${paramStr}</td>
+        <td>$${r.final_balance.toLocaleString()}</td>
+        <td>${r.total_trades}</td>
+        <td>${(r.win_rate * 100).toFixed(1)}%</td>
+        <td>${(r.max_drawdown * 100).toFixed(1)}%</td>
+        <td>${r.profit_factor.toFixed(2)}</td>
+        <td>${r.sharpe_ratio.toFixed(2)}</td>
+        <td><span class="badge ${moClass}">${(r.avg_monthly_return || 0).toFixed(1)}%</span></td>
+        <td>${(r.max_monthly_drawdown || 0).toFixed(1)}%</td>
+        <td>${r.months_above_target || 0}</td>
+        <td><button class="btn btn-sm" onclick="createPlanFromOptResult('${document.getElementById("opt-symbol").value}', '${document.getElementById("opt-strategy").value}', ${JSON.stringify(JSON.stringify(r.parameters))})">Use</button></td>
+      `;
+      tbody.appendChild(row);
+    });
+
+    // Export text
+    document.getElementById("opt-export").value = data.analysis_markdown || "";
+  }
+
+  async function createPlanFromOptResult(symbol, strategyType, paramsJson) {
+    const params = JSON.parse(paramsJson);
+    const paramStr = Object.entries(params).map(([k,v]) => `${k}=${v}`).join(", ");
+    const resp = await fetch("/api/trade-plans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: `Optimized ${strategyType} (${paramStr})`,
+        symbol: symbol,
+        strategy_type: strategyType,
+        parameters: params,
+      }),
+    });
+    const data = await resp.json();
+    if (data.ok) {
+      alert(`Trade plan created (ID: ${data.id}). Refreshing...`);
+      location.reload();
+    }
+  }
+
+  function copyExport() {
+    const el = document.getElementById("opt-export");
+    el.select();
+    navigator.clipboard.writeText(el.value);
+  }
+
+  function copyField(id) {
+    const el = document.getElementById(id);
+    el.select();
+    navigator.clipboard.writeText(el.value);
+  }
+
+  // --- Claude-in-the-Loop Workflow ---
+
+  async function generateClaudePrompt() {
+    const msg = document.getElementById("cw-step1-msg");
+    msg.textContent = "Generating context prompt...";
+
+    const endDate = document.getElementById("cw-end").value || new Date().toISOString().split("T")[0];
+
+    const resp = await fetch("/api/claude/suggest-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol: document.getElementById("cw-symbol").value,
+        timeframe: document.getElementById("cw-timeframe").value,
+        start_date: document.getElementById("cw-start").value + "T00:00:00+00:00",
+        end_date: endDate + "T23:59:59+00:00",
+      }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      msg.textContent = `Error: ${data.error}`;
+      return;
+    }
+
+    msg.textContent = `Prompt generated (${data.candle_count} candles available). Copy it and paste into a Claude conversation.`;
+    document.getElementById("cw-prompt").value = data.prompt;
+    document.getElementById("cw-prompt-area").classList.remove("hidden");
+    document.getElementById("cw-step2").classList.remove("hidden");
+  }
+
+  async function runClaudeSuggestions() {
+    const msg = document.getElementById("cw-step2-msg");
+    const claudeResponse = document.getElementById("cw-claude-response").value.trim();
+
+    if (!claudeResponse) {
+      msg.textContent = "Please paste Claude's response first.";
+      return;
+    }
+
+    msg.textContent = "Parsing suggestions and running optimizer...";
+    document.getElementById("cw-stop-btn").classList.remove("hidden");
+
+    const endDate = document.getElementById("cw-end").value || new Date().toISOString().split("T")[0];
+
+    const resp = await fetch("/api/claude/run-suggestions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        claude_response: claudeResponse,
+        symbol: document.getElementById("cw-symbol").value,
+        timeframe: document.getElementById("cw-timeframe").value,
+        start_date: document.getElementById("cw-start").value + "T00:00:00+00:00",
+        end_date: endDate + "T23:59:59+00:00",
+        initial_balance: parseFloat(document.getElementById("cw-balance").value),
+        rank_by: document.getElementById("cw-rank").value,
+        lot_type: document.getElementById("cw-lot-type").value,
+        risk_per_trade_pct: parseFloat(document.getElementById("cw-risk-pct").value),
+        sl_atr_multiplier: parseFloat(document.getElementById("cw-sl-atr").value),
+        tp_atr_multiplier: parseFloat(document.getElementById("cw-tp-atr").value),
+        monthly_max_loss_pct: parseFloat(document.getElementById("cw-monthly-loss").value),
+      }),
+    });
+    const data = await resp.json();
+    document.getElementById("cw-stop-btn").classList.add("hidden");
+
+    if (data.error) {
+      msg.textContent = `Error: ${data.error}`;
+      return;
+    }
+
+    msg.textContent = `Parsed ${data.suggestions_parsed} suggestions. Optimization complete!`;
+
+    // Show results
+    const container = document.getElementById("cw-results-container");
+    container.innerHTML = "";
+
+    (data.results || []).forEach((group, idx) => {
+      const div = document.createElement("div");
+      div.style.marginBottom = "16px";
+
+      let html = `<h4>Strategy ${idx + 1}: ${group.strategy_type}</h4>`;
+      if (group.rationale) html += `<p class="small"><em>${group.rationale}</em></p>`;
+      if (group.error) {
+        html += `<p class="small" style="color: var(--danger);">Error: ${group.error}</p>`;
+      }
+
+      const tops = group.top_results || [];
+      if (tops.length > 0) {
+        html += `<table class="table"><thead><tr><th>#</th><th>Parameters</th><th>Balance</th><th>Trades</th><th>Win%</th><th>DD</th><th>PF</th><th>Sharpe</th><th>Avg Mo.</th><th>Mo.DD</th><th></th></tr></thead><tbody>`;
+        tops.forEach(r => {
+          const ps = Object.entries(r.parameters).map(([k,v]) => `${k}=${v}`).join(", ");
+          html += `<tr>
+            <td>${r.rank}</td>
+            <td style="font-size: 12px;">${ps}</td>
+            <td>$${r.final_balance.toLocaleString()}</td>
+            <td>${r.total_trades}</td>
+            <td>${(r.win_rate * 100).toFixed(1)}%</td>
+            <td>${(r.max_drawdown * 100).toFixed(1)}%</td>
+            <td>${r.profit_factor.toFixed(2)}</td>
+            <td>${r.sharpe_ratio.toFixed(2)}</td>
+            <td>${(r.avg_monthly_return || 0).toFixed(1)}%</td>
+            <td>${(r.max_monthly_drawdown || 0).toFixed(1)}%</td>
+            <td><button class="btn btn-sm" onclick="createPlanFromOptResult('${document.getElementById('cw-symbol').value}', '${group.strategy_type}', ${JSON.stringify(JSON.stringify(r.parameters))})">Use</button></td>
+          </tr>`;
+        });
+        html += `</tbody></table>`;
+      } else if (!group.error) {
+        html += `<p class="small">No profitable results for this configuration.</p>`;
+      }
+
+      div.innerHTML = html;
+      container.appendChild(div);
+    });
+
+    // Show review prompt
+    document.getElementById("cw-review-prompt").value = data.review_prompt || "";
+    document.getElementById("cw-step3").classList.remove("hidden");
+    document.getElementById("cw-step3").scrollIntoView({ behavior: "smooth" });
+  }
+
+  function startNextIteration() {
+    // Reset step 2 for another round
+    document.getElementById("cw-claude-response").value = "";
+    document.getElementById("cw-step2-msg").textContent = "Paste Claude's refined suggestions below for another iteration.";
+    document.getElementById("cw-step2").scrollIntoView({ behavior: "smooth" });
+  }
+
+  // Init
+  document.getElementById("opt-end").value = new Date().toISOString().split("T")[0];
+  document.getElementById("cw-end").value = new Date().toISOString().split("T")[0];
+  updateParamFields();
+</script>
+{% endblock %}

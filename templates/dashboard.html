@@ -1,0 +1,501 @@
+{% extends "base.html" %}
+{% set active_page = "dashboard" %}
+
+{% block title %}Dashboard — WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>WeldonTrader Dashboard</h1>
+  <p>Account overview, live positions, signals, and performance.</p>
+</header>
+<main>
+  <!-- System Status Row -->
+  <section class="card">
+    <div class="status-grid">
+      <div class="status-item"><span class="status-label">Execution Mode</span><span class="status-value" id="sys-mode">--</span></div>
+      <div class="status-item"><span class="status-label">Trading Status</span><span class="status-value" id="sys-paused">--</span></div>
+      <div class="status-item"><span class="status-label">Active Rule Set</span><span class="status-value" id="sys-ruleset">--</span></div>
+      <div class="status-item"><span class="status-label">Signal Scanning</span><span class="status-value" id="sys-scanning">--</span></div>
+      <div class="status-item"><span class="status-label">Open Positions</span><span class="status-value" id="sys-positions">--</span></div>
+      <div class="status-item"><span class="status-label">Today's Signals</span><span class="status-value" id="sys-signals">--</span></div>
+    </div>
+  </section>
+
+  <!-- Account Status Table (pre-rendered, updated by JS) -->
+  <section class="card">
+    <h2>Accounts</h2>
+    <table class="table" id="account-table">
+      <thead>
+        <tr><th>Platform</th><th>Account</th><th>Status</th><th>Balance</th><th>Equity</th><th>Currency</th><th>Actions</th></tr>
+      </thead>
+      <tbody>
+        {% for acc in config.accounts %}
+        <tr data-account="{{ acc.name }}"{% if not acc.enabled %} class="acct-disabled"{% endif %}>
+          <td>{{ acc.account_type | upper }}</td>
+          <td>{{ acc.name }}</td>
+          <td class="acct-status">{% if not acc.enabled %}<span class="badge badge-warning">Disabled</span>{% else %}Loading...{% endif %}</td>
+          <td class="acct-balance">--</td>
+          <td class="acct-equity">--</td>
+          <td>USD</td>
+          <td class="acct-actions">
+            <button class="btn btn-sm {% if acc.enabled %}btn-warn{% else %}btn-outline{% endif %} toggle-btn" onclick="toggleAccount('{{ acc.name }}')">{% if acc.enabled %}Disable{% else %}Enable{% endif %}</button>
+            <button class="btn btn-sm btn-danger close-all-btn" onclick="closeAllPositions('{{ acc.name }}')">Close All</button>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Open Positions -->
+  <section class="card">
+    <h2>Open Positions</h2>
+    <table class="table" id="pos-table">
+      <thead><tr><th>Platform</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Entry</th><th>Current</th><th>SL</th><th>TP</th><th>P&L</th></tr></thead>
+      <tbody><tr><td colspan="9" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <!-- Two-column: Recent Signals + Trade Performance -->
+  <div style="display:flex;gap:15px;flex-wrap:wrap">
+    <section class="card" style="flex:1;min-width:400px">
+      <h2>Recent Signals</h2>
+      <table class="table" id="signals-table">
+        <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>Conf</th><th>Triggered By</th><th>Status</th></tr></thead>
+        <tbody><tr><td colspan="6" class="small">Loading...</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card" style="flex:1;min-width:400px">
+      <h2>Trade Performance</h2>
+      <div class="chart-wrap" style="height:220px">
+        <canvas id="perf-chart"></canvas>
+      </div>
+      <div class="status-grid" id="perf-stats" style="margin-top:8px"></div>
+    </section>
+  </div>
+
+  <!-- Per-Account Performance (dynamically generated) -->
+  <div id="account-perf-sections">
+    {% for acc in config.accounts %}
+    {% set safe_id = acc.name | replace(' ', '_') | replace('.', '_') | replace('/', '_') %}
+    <section class="card" id="acct-section-{{ safe_id }}">
+      <h2>{{ acc.name }} — Account Performance{% if not acc.enabled %} <span class="badge badge-warning">Disabled</span>{% endif %}</h2>
+      <div style="display:flex;gap:15px;flex-wrap:wrap">
+        <div style="flex:1;min-width:350px">
+          <h3>Balance / Equity History</h3>
+          <div class="chart-wrap" style="height:200px">
+            <canvas id="acct-chart-{{ safe_id }}"></canvas>
+          </div>
+          <p class="small" id="acct-chart-note-{{ safe_id }}">Loading chart data...</p>
+        </div>
+        <div style="flex:1;min-width:350px;max-height:400px;overflow-y:auto">
+          <h3>Trade History</h3>
+          <table class="table" id="acct-trades-{{ safe_id }}">
+            <thead><tr><th>Time</th><th>Symbol</th><th>Side</th><th>P&L</th><th>Exit</th></tr></thead>
+            <tbody><tr><td colspan="5" class="small">Loading...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+    {% endfor %}
+  </div>
+
+  <!-- Trade History -->
+  <section class="card">
+    <h2>Recent Trade History</h2>
+    <table class="table" id="hist-table">
+      <thead><tr><th>Opened</th><th>Closed</th><th>Platform</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Entry</th><th>Exit</th><th>P&L</th><th>Exit Type</th></tr></thead>
+      <tbody><tr><td colspan="10" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let perfChart = null;
+  const EST = {timeZone: 'America/New_York'};
+  function fmtTime(iso) { return iso ? new Date(iso).toLocaleString('en-US', EST) : '--'; }
+  function fmtShort(iso) { return iso ? new Date(iso).toLocaleString('en-US', {...EST, month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '--'; }
+
+  function pnlColor(v) {
+    if (v == null) return '--';
+    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
+  }
+  function sideBadge(s) {
+    return `<span style="font-weight:600;color:${s==='buy'?'#27ae60':'#e74c3c'}">${s.toUpperCase()}</span>`;
+  }
+  function statusBadge(s, reason) {
+    const colors = {confirmed:'#27ae60',executed:'#1f4b57',rejected:'#e74c3c',pending:'#e67e22'};
+    const title = reason ? ` title="${reason.replace(/"/g, '&quot;')}"` : '';
+    const label = s === 'rejected' && reason ? reason.split(':')[0].substring(0, 20) : s;
+    return `<span${title} style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[s]||'#888'};color:#fff;font-size:11px;cursor:${reason?'help':'default'}">${label}</span>`;
+  }
+  function platformBadge(t) {
+    const colors = {mt5:'#1f4b57',dxtrade:'#6a5acd',paper:'#888'};
+    return `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[t]||'#888'};color:#fff;font-size:11px">${(t||'?').toUpperCase()}</span>`;
+  }
+  function confColor(c) {
+    if (c == null) return '--';
+    const color = c >= 0.7 ? '#27ae60' : c >= 0.55 ? '#e67e22' : '#888';
+    return `<span style="color:${color};font-weight:600">${(c*100).toFixed(0)}%</span>`;
+  }
+
+  async function toggleAccount(name) {
+    const resp = await fetch(`/api/accounts/${encodeURIComponent(name)}/toggle`, { method: 'POST' });
+    const d = await resp.json();
+    if (d.ok) {
+      applyAccountState(name, d.enabled);
+      loadAccounts();
+    } else {
+      alert(d.error || 'Toggle failed');
+    }
+  }
+
+  async function closeAllPositions(name) {
+    if (!confirm(`Close ALL open positions for "${name}"?\nThis cannot be undone.`)) return;
+    const btn = document.querySelector(`tr[data-account="${name}"] .close-all-btn`);
+    if (btn) { btn.disabled = true; btn.textContent = 'Closing\u2026'; }
+    try {
+      const resp = await fetch(`/api/accounts/${encodeURIComponent(name)}/close-all`, { method: 'POST' });
+      const d = await resp.json();
+      if (d.ok) {
+        const msg = d.errors
+          ? `Closed ${d.closed} position(s) with ${d.errors} error(s).`
+          : `Closed ${d.closed} position(s).`;
+        alert(msg);
+      } else {
+        alert(d.error || 'Close all failed');
+      }
+    } catch (e) {
+      alert('Request failed: ' + e.message);
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = 'Close All'; }
+      loadPositions();
+    }
+  }
+
+  function applyAccountState(name, enabled) {
+    const row = document.querySelector(`tr[data-account="${name}"]`);
+    if (!row) return;
+    row.classList.toggle('acct-disabled', !enabled);
+    const toggleBtn = row.querySelector('.toggle-btn');
+    if (toggleBtn) {
+      toggleBtn.textContent = enabled ? 'Disable' : 'Enable';
+      toggleBtn.classList.toggle('btn-warn', enabled);
+      toggleBtn.classList.toggle('btn-outline', !enabled);
+    }
+    if (!enabled) {
+      row.querySelector('.acct-status').innerHTML = '<span class="badge badge-warning">Disabled</span>';
+    }
+  }
+
+  async function loadAccounts() {
+    const resp = await fetch('/api/accounts/status');
+    const d = await resp.json();
+    const accounts = d.accounts || [];
+
+    // Update table rows by matching account name
+    const tbody = document.querySelector('#account-table tbody');
+    const rows = tbody.querySelectorAll('tr');
+    for (const row of rows) {
+      const name = row.getAttribute('data-account');
+      if (!name) continue;
+      const acc = accounts.find(a => a.name === name);
+      if (!acc) continue;
+
+      // Enabled/disabled state
+      applyAccountState(name, acc.enabled !== false);
+
+      // Connection status (only for enabled accounts)
+      if (acc.enabled !== false) {
+        row.querySelector('.acct-status').innerHTML = acc.connected
+          ? '<span style="color:#27ae60;font-weight:600">Connected</span>'
+          : `<span style="color:#e74c3c">${acc.error || 'Offline'}</span>`;
+      }
+      row.querySelector('.acct-balance').innerHTML = acc.balance > 0
+        ? `<strong>$${acc.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}</strong>` : '<span class="small">--</span>';
+      row.querySelector('.acct-equity').innerHTML = acc.equity > 0
+        ? `<strong>$${acc.equity.toLocaleString(undefined, {minimumFractionDigits: 2})}</strong>` : '<span class="small">--</span>';
+    }
+
+    // System status
+    const mode = d.mode || 'paper';
+    document.getElementById('sys-mode').innerHTML = mode === 'live'
+      ? '<span style="color:#e74c3c;font-weight:600">LIVE</span>'
+      : '<span style="color:#888;font-weight:600">Paper</span>';
+    document.getElementById('sys-paused').innerHTML = d.paused
+      ? '<span style="color:#e67e22;font-weight:600">PAUSED</span>'
+      : '<span style="color:#27ae60;font-weight:600">Active</span>';
+  }
+
+  async function loadSystemInfo() {
+    // Active rulesets
+    try {
+      const rs = await fetch('/api/rulesets');
+      const rsData = await rs.json();
+      const active = (rsData.rulesets||[]).filter(r => r.status === 'active');
+      document.getElementById('sys-ruleset').textContent = active.length
+        ? active.map(r => `${r.name} v${r.version}`).join(', ')
+        : 'None';
+    } catch(e) { document.getElementById('sys-ruleset').textContent = '--'; }
+
+    // Scanning status
+    try {
+      const hResp = await fetch('/healthz');
+      const h = await hResp.json();
+      document.getElementById('sys-scanning').innerHTML = h.candle_collection
+        ? '<span style="color:#27ae60">Enabled</span>'
+        : '<span style="color:#888">Disabled</span>';
+    } catch(e) {}
+  }
+
+  async function loadPositions() {
+    // Broker positions
+    const bResp = await fetch('/api/accounts/positions');
+    const bData = await bResp.json();
+    const brokerPos = (bData.positions||[]);
+
+    // Internal tracked positions
+    const tResp = await fetch('/api/trades?status=open');
+    const tData = await tResp.json();
+    const tracked = (tData.trades||[]);
+
+    const tbody = document.querySelector('#pos-table tbody');
+    const allPos = [...brokerPos, ...tracked.filter(t => !brokerPos.some(b => String(b.ticket) === String(t.platform_ticket)))];
+
+    document.getElementById('sys-positions').textContent = allPos.length;
+
+    if (!allPos.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No open positions.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    allPos.forEach(p => {
+      const row = document.createElement('tr');
+      const platform = p.platform || p.account || '?';
+      row.innerHTML = `
+        <td>${platformBadge(platform)}</td>
+        <td><strong>${p.symbol}</strong></td>
+        <td>${sideBadge(p.side)}</td>
+        <td>${p.volume}</td>
+        <td>${(p.price||p.entry_price||0).toFixed(5)}</td>
+        <td>${(p.current_price||0).toFixed(5)}</td>
+        <td>${(p.sl||p.stop_loss||0).toFixed(5)}</td>
+        <td>${(p.tp||p.take_profit||0).toFixed(5)}</td>
+        <td>${pnlColor(p.profit||p.pnl)}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadSignals() {
+    const resp = await fetch('/api/signals?limit=10');
+    const data = await resp.json();
+    const signals = data.signals || [];
+
+    document.getElementById('sys-signals').textContent = signals.filter(s =>
+      s.created_at && new Date(s.created_at).toDateString() === new Date().toDateString()
+    ).length;
+
+    const tbody = document.querySelector('#signals-table tbody');
+    if (!signals.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="small">No recent signals.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    signals.slice(0, 8).forEach(s => {
+      const row = document.createElement('tr');
+      const time = s.created_at ? new Date(s.created_at).toLocaleTimeString('en-US', EST) : '--';
+      const trigger = s.reason || s.strategy_type || '--';
+      const rejectReason = s.reject_reason || '';
+      const statusCol = s.status === 'rejected' && rejectReason
+        ? `<span style="color:#e74c3c;font-size:11px" title="${rejectReason.replace(/"/g, '&quot;')}">${rejectReason.substring(0, 30)}${rejectReason.length > 30 ? '…' : ''}</span>`
+        : statusBadge(s.status);
+      row.innerHTML = `
+        <td>${time}</td>
+        <td><strong>${s.symbol}</strong></td>
+        <td>${sideBadge(s.side)}</td>
+        <td>${confColor(s.confidence)}</td>
+        <td style="font-size:11px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${(trigger||'').replace(/"/g, '&quot;')}">${trigger.substring(0, 30)}</td>
+        <td>${statusCol}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadTradeHistory() {
+    const resp = await fetch('/api/trades?status=closed&limit=20');
+    const data = await resp.json();
+    const trades = data.trades || [];
+    const tbody = document.querySelector('#hist-table tbody');
+
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="10" class="small">No closed trades yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = '';
+    trades.forEach(t => {
+      const row = document.createElement('tr');
+      const opened = fmtTime(t.opened_at);
+      const closed = fmtTime(t.closed_at);
+      row.innerHTML = `
+        <td style="font-size:12px">${opened}</td>
+        <td style="font-size:12px">${closed}</td>
+        <td>${platformBadge(t.platform)}</td>
+        <td><strong>${t.symbol}</strong></td>
+        <td>${sideBadge(t.side)}</td>
+        <td>${t.volume}</td>
+        <td>${t.entry_price?.toFixed(5)??'--'}</td>
+        <td>${t.exit_price?.toFixed(5)??'--'}</td>
+        <td>${pnlColor(t.pnl)}</td>
+        <td>${t.exit_type||'--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadPerformance() {
+    const resp = await fetch('/api/analytics/equity-curve');
+    const data = await resp.json();
+    const curve = data.curve || [];
+
+    const ctx = document.getElementById('perf-chart').getContext('2d');
+    if (perfChart) perfChart.destroy();
+
+    if (!curve.length) {
+      document.getElementById('perf-stats').innerHTML = '<em class="small">No trade data yet.</em>';
+      return;
+    }
+
+    perfChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: curve.map(p => new Date(p.time).toLocaleDateString()),
+        datasets: [{
+          label: 'Cumulative P&L',
+          data: curve.map(p => p.pnl),
+          borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)',
+          tension: 0.2, pointRadius: 1, fill: true,
+        }]
+      },
+      options: { responsive: true, maintainAspectRatio: false, animation: false,
+        scales: { x: { ticks: { maxTicksLimit: 6 } } },
+      },
+    });
+
+    // Stats
+    const totalPnl = curve[curve.length - 1]?.pnl || 0;
+    const totalTrades = curve.length;
+    const wins = curve.filter(p => p.trade_pnl > 0).length;
+    const wr = totalTrades > 0 ? (wins / totalTrades * 100).toFixed(0) : 0;
+    document.getElementById('perf-stats').innerHTML = `
+      <div class="status-item"><span class="status-label">Total P&L</span><span class="status-value">${pnlColor(totalPnl)}</span></div>
+      <div class="status-item"><span class="status-label">Trades</span><span class="status-value">${totalTrades}</span></div>
+      <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value">${wr}%</span></div>
+    `;
+  }
+
+  // Per-account equity charts (keyed by account name)
+  const acctCharts = {};
+
+  // Pre-rendered account names from server
+  const accountNames = [{% for acc in config.accounts %}'{{ acc.name }}',{% endfor %}];
+
+  async function loadAccountPerformance() {
+    for (const name of accountNames) {
+      const safeId = name.replace(/[^a-zA-Z0-9]/g, '_');
+      const canvasEl = document.getElementById(`acct-chart-${safeId}`);
+      const noteEl = document.getElementById(`acct-chart-note-${safeId}`);
+      const tradesEl = document.querySelector(`#acct-trades-${safeId} tbody`);
+
+      // Load equity history
+      try {
+        const hResp = await fetch(`/api/accounts/${encodeURIComponent(name)}/history`);
+        const hData = await hResp.json();
+        const points = hData.points || [];
+
+        if (points.length > 1 && canvasEl) {
+          const ctx = canvasEl.getContext('2d');
+          if (acctCharts[safeId]) acctCharts[safeId].destroy();
+          acctCharts[safeId] = new Chart(ctx, {
+            type: 'line',
+            data: {
+              labels: points.map(p => new Date(p.time).toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})),
+              datasets: [
+                { label: 'Balance', data: points.map(p => p.balance), borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)', tension: 0.2, pointRadius: 0, fill: true },
+                { label: 'Equity', data: points.map(p => p.equity), borderColor: '#27ae60', borderWidth: 1, tension: 0.2, pointRadius: 0, fill: false, borderDash: [4,2] },
+              ]
+            },
+            options: { responsive: true, maintainAspectRatio: false, animation: false,
+              scales: { x: { ticks: { maxTicksLimit: 6 } } } },
+          });
+          const first = points[0].balance, last = points[points.length - 1].balance;
+          const change = last - first;
+          const pct = first > 0 ? (change / first * 100) : 0;
+          if (noteEl) noteEl.innerHTML = `${points.length} snapshots | Change: ${pnlColor(change)} (${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%)`;
+        } else if (noteEl) {
+          noteEl.textContent = 'Collecting snapshots every 5 min — chart will populate over time.';
+        }
+      } catch (e) { if (noteEl) noteEl.textContent = 'Error loading history.'; }
+
+      // Load recent trades
+      try {
+        const tResp = await fetch(`/api/accounts/${encodeURIComponent(name)}/trades?limit=10`);
+        const tData = await tResp.json();
+        const trades = tData.trades || [];
+        if (!tradesEl) continue;
+        if (!trades.length) {
+          tradesEl.innerHTML = '<tr><td colspan="5" class="small">No trade history available.</td></tr>';
+        } else {
+          tradesEl.innerHTML = '';
+          trades.forEach(t => {
+            const row = document.createElement('tr');
+            const time = fmtShort(t.closed_at);
+            row.innerHTML = `<td style="font-size:12px">${time}</td><td><strong>${t.symbol||'--'}</strong></td>
+              <td>${sideBadge(t.side||'buy')}</td><td>${pnlColor(t.pnl)}</td><td>${t.exit_type||t.comment||'--'}</td>`;
+            tradesEl.appendChild(row);
+          });
+        }
+      } catch (e) { if (tradesEl) tradesEl.innerHTML = '<tr><td colspan="5" class="small">Error loading trades.</td></tr>'; }
+    }
+  }
+
+  function loadAll() {
+    loadAccounts();
+    loadSystemInfo();
+    loadPositions();
+    loadSignals();
+    loadTradeHistory();
+    loadPerformance();
+    loadAccountPerformance();
+  }
+
+  loadAll();
+
+  // Fast polling on first load until accounts populate, then slow down
+  let accountsLoaded = false;
+  const fastPoll = setInterval(async () => {
+    const resp = await fetch('/api/accounts/status');
+    const d = await resp.json();
+    const accs = d.accounts || [];
+    if (accs.some(a => a.connected && a.balance > 0)) {
+      accountsLoaded = true;
+      clearInterval(fastPoll);
+      loadAccounts();  // final update
+    }
+  }, 3000);
+
+  // Stop fast polling after 30s regardless
+  setTimeout(() => { clearInterval(fastPoll); accountsLoaded = true; }, 30000);
+
+  setInterval(() => { loadAccounts(); loadPositions(); loadSignals(); }, 15000);
+  setInterval(() => { loadTradeHistory(); loadPerformance(); loadAccountPerformance(); }, 60000);
+</script>
+{% endblock %}
