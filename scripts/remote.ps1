@@ -101,10 +101,20 @@ try {
     "logs" {
         $Command = @"
 `$Uvicorn = Join-Path "$ProjectDir" "logs\uvicorn.log"
+`$Stdout = Join-Path "$ProjectDir" "logs\uvicorn.stdout.log"
+`$Stderr = Join-Path "$ProjectDir" "logs\uvicorn.stderr.log"
 `$App = Join-Path "$ProjectDir" "logs\app.log"
 if (Test-Path -LiteralPath `$Uvicorn) {
     Write-Output "--- uvicorn.log ---"
     Get-Content -LiteralPath `$Uvicorn -Tail $LogTail
+}
+if (Test-Path -LiteralPath `$Stdout) {
+    Write-Output "--- uvicorn.stdout.log ---"
+    Get-Content -LiteralPath `$Stdout -Tail $LogTail
+}
+if (Test-Path -LiteralPath `$Stderr) {
+    Write-Output "--- uvicorn.stderr.log ---"
+    Get-Content -LiteralPath `$Stderr -Tail $LogTail
 }
 if (Test-Path -LiteralPath `$App) {
     Write-Output "--- app.log ---"

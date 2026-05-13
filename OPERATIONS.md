@@ -30,10 +30,11 @@ and restarts the app.
 
 - Project: `C:\WeldonTradeNeo`
 - SSH alias: `weldontrade`
-- Scheduled task: `WeldonTradeNeo`
+- Scheduled task: `WeldonTradeNeo` running under the interactive Administrator account at logon
 - App URL on server: `http://127.0.0.1:8000`
 - External URL: `http://15.204.224.153:8000`
-- Uvicorn log: `C:\WeldonTradeNeo\logs\uvicorn.log`
+- Uvicorn task log: `C:\WeldonTradeNeo\logs\uvicorn.log`
+- Uvicorn stdout/stderr: `C:\WeldonTradeNeo\logs\uvicorn.stdout.log`, `C:\WeldonTradeNeo\logs\uvicorn.stderr.log`
 - App log: `C:\WeldonTradeNeo\logs\app.log`
 
 ## Runtime Files Preserved During Deploy

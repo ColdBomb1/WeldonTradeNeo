@@ -11,6 +11,8 @@ $ProjectDir = (Resolve-Path -LiteralPath $ProjectDir).Path
 $VenvPython = Join-Path $ProjectDir "venv\Scripts\python.exe"
 $LogDir = Join-Path $ProjectDir "logs"
 $LogFile = Join-Path $LogDir "uvicorn.log"
+$StdoutLog = Join-Path $LogDir "uvicorn.stdout.log"
+$StderrLog = Join-Path $LogDir "uvicorn.stderr.log"
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 Set-Location $ProjectDir
@@ -25,5 +27,15 @@ $env:WELDON_ENV = "production"
 Add-Content -Path $LogFile -Value ""
 Add-Content -Path $LogFile -Value "=== WeldonTradeNeo start $(Get-Date -Format o) ==="
 
-& $VenvPython -m uvicorn main:app --host $HostAddress --port $Port *>> $LogFile
-exit $LASTEXITCODE
+$Args = @("-m", "uvicorn", "main:app", "--host", $HostAddress, "--port", [string]$Port)
+$Process = Start-Process `
+    -FilePath $VenvPython `
+    -ArgumentList $Args `
+    -WorkingDirectory $ProjectDir `
+    -RedirectStandardOutput $StdoutLog `
+    -RedirectStandardError $StderrLog `
+    -PassThru
+
+$Process.WaitForExit()
+Add-Content -Path $LogFile -Value "=== WeldonTradeNeo exit $($Process.ExitCode) $(Get-Date -Format o) ==="
+exit $Process.ExitCode
