@@ -9,3 +9,4 @@ psycopg2-binary==2.9.10
 anthropic==0.52.0
 websocket-client==1.8.0
 beautifulsoup4==4.12.3
+tzdata==2026.1
