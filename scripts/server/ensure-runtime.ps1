@@ -19,8 +19,12 @@ function Test-VenvPython {
         return $false
     }
 
-    & $PythonPath -c "import sys; print(sys.executable)" *> $null
-    return ($LASTEXITCODE -eq 0)
+    try {
+        & $PythonPath -c "import sys; print(sys.executable)" *> $null
+        return ($LASTEXITCODE -eq 0)
+    } catch {
+        return $false
+    }
 }
 
 if (-not (Test-VenvPython $VenvPython)) {
