@@ -21,6 +21,48 @@ from services import indicator_service, claude_service, trade_manager, news_serv
 logger = logging.getLogger(__name__)
 
 
+# Per (scan_key, timeframe, symbol) latest bar timestamp we've already scanned.
+# Used so a 15m ruleset checked every 5min only burns one Claude call per bar
+# (i.e. once every 15min) instead of three. Resets on process restart, which is
+# fine — at worst the first scan after a restart re-scores a bar already seen
+# by the previous instance.
+_last_scanned_bar: dict[tuple[str, str, str], str] = {}
+
+
+# Minutes per timeframe. All are divisors of 1440 (one day), which lets us
+# floor wall-clock time to a bar boundary by dividing minutes-since-midnight.
+_TIMEFRAME_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
+
+
+def _current_bar_key(timeframe: str, now: datetime) -> str:
+    """Return a stable ISO string for the bar currently in progress at `now`.
+
+    Earlier versions keyed the gate off candles[-1]["time"], but the candle
+    collector rewrites the in-progress bar's ts on every tick (seen in the DB
+    as rows at 07:29:39, 07:32:39, 07:35:40, …). That made every scan look
+    like a new bar and defeated the gate. Computing the bar start from
+    wall-clock + timeframe is independent of collector behavior and stable
+    for the full bar period.
+    """
+    tf_min = _TIMEFRAME_MINUTES.get(timeframe, 15)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    elapsed_min = int((now - midnight).total_seconds() // 60)
+    bar_offset = (elapsed_min // tf_min) * tf_min
+    return (midnight + timedelta(minutes=bar_offset)).isoformat()
+
+
+def _claim_new_bar(scan_key: str, timeframe: str, symbol: str, bar_ts: str) -> bool:
+    """Return True the first time we see (scan_key, tf, symbol, bar_ts), False
+    after that. Marks the bar as claimed before the caller spends any work on
+    it — if the downstream Claude call fails, the bar isn't retried until the
+    next bar closes (acceptable, prevents retry storms during API outages)."""
+    key = (scan_key, timeframe, symbol)
+    if _last_scanned_bar.get(key) == bar_ts:
+        return False
+    _last_scanned_bar[key] = bar_ts
+    return True
+
+
 def _query_candles(symbol: str, timeframe: str, limit: int = 200) -> list[dict]:
     """Fetch recent candles from the database as dicts."""
     session = get_session()
@@ -162,6 +204,11 @@ def _scan_once():
         logger.info("Daily signal limit (%d) reached, skipping scan", sig_cfg.max_signals_per_day)
         return
 
+    logger.info(
+        "Strategy scan tick: %d strategies x %d symbols x %d timeframes",
+        len(strategy_names), len(symbols), len(timeframes),
+    )
+
     for symbol in symbols:
         for timeframe in timeframes:
             candles = _query_candles(symbol, timeframe)
@@ -171,6 +218,13 @@ def _scan_once():
 
             if not _check_candle_freshness(candles, timeframe):
                 logger.debug("Stale candle data for %s/%s, skipping", symbol, timeframe)
+                continue
+
+            # Bar-close gating: skip if we've already scanned this bar.
+            # All strategies see the same candles for this (sym, tf) so one
+            # gate covers all of them.
+            latest_bar_ts = _current_bar_key(timeframe, datetime.now(timezone.utc))
+            if not _claim_new_bar("strategy", timeframe, symbol, latest_bar_ts):
                 continue
 
             for strategy_name in strategy_names:
@@ -333,6 +387,8 @@ def _scan_rulesets():
     if not rulesets:
         return
 
+    logger.info("Ruleset scan tick: %d active ruleset(s)", len(rulesets))
+
     for rs_id, rs_name, rules_text, rs_symbols, rs_timeframes in rulesets:
         symbols = rs_symbols if rs_symbols else cfg.symbols
         timeframes = rs_timeframes if rs_timeframes else sig_cfg.timeframes
@@ -345,6 +401,30 @@ def _scan_rulesets():
                 if c and len(c) >= 50:
                     all_candles[sym] = c
 
+            # Fetch higher-timeframe context (1h, 4h) per symbol so Claude can
+            # form directional bias from the broader picture before scoring the
+            # entry-timeframe trigger. Skip redundant fetch if primary TF already
+            # matches a higher TF.
+            higher_tfs = [tf for tf in ("1h", "4h") if tf != timeframe]
+            multi_tf_by_symbol: dict[str, dict[str, list[dict]]] = {}
+            for sym in symbols:
+                mtf: dict[str, list[dict]] = {}
+                for htf in higher_tfs:
+                    hc = _query_candles(sym, htf, limit=60)
+                    if hc and len(hc) >= 20:
+                        mtf[htf] = hc
+                if mtf:
+                    multi_tf_by_symbol[sym] = mtf
+
+            # Per-tick counters — the summary log at the end of this (ruleset,
+            # timeframe) iteration shows exactly how many symbols actually got
+            # a Claude call vs were gated out. If evaluated=0 across ticks
+            # until a new bar closes, the bar-close gate is doing its job.
+            evaluated = 0
+            skipped_same_bar = 0
+            skipped_cooldown = 0
+            skipped_news = 0
+
             for symbol in symbols:
                 if sig_cfg.max_signals_per_day > 0 and _count_signals_today() >= sig_cfg.max_signals_per_day:
                     return
@@ -355,13 +435,23 @@ def _scan_rulesets():
                 if not _check_candle_freshness(candles, timeframe):
                     continue
 
+                # Bar-close gating: skip if we've already scanned this bar
+                # for this ruleset. Keeps a 15m ruleset on a 5min scan_interval
+                # firing Claude once per bar instead of three.
+                latest_bar_ts = _current_bar_key(timeframe, datetime.now(timezone.utc))
+                if not _claim_new_bar(f"ruleset:{rs_id}", timeframe, symbol, latest_bar_ts):
+                    skipped_same_bar += 1
+                    continue
+
                 # Cooldown check
                 if _check_cooldown(symbol, sig_cfg.cool_down_minutes):
+                    skipped_cooldown += 1
                     continue
 
                 # News check
                 blocked, _ = news_service.is_high_impact_window(symbol)
                 if blocked:
+                    skipped_news += 1
                     continue
 
                 # Evaluate rules with Claude (including cross-pair context)
@@ -375,17 +465,33 @@ def _scan_rulesets():
                 upcoming_events = [e for e in upcoming_events if abs(e.get("minutes_until", 999)) <= 45]
                 sentiment = sentiment_service.get_current_sentiment(symbol) if cfg.news.enabled else None
 
+                evaluated += 1
                 result = rule_engine.evaluate_rules(
                     rules_text, symbol, timeframe, candles,
                     indicators, upcoming_events, sentiment,
+                    multi_tf_candles=multi_tf_by_symbol.get(symbol),
                 )
 
                 signal_type = result.get("signal", "HOLD")
+                confidence = result.get("confidence", 0)
+
+                # Visibility: log EVERY scan outcome, not just the ones that pass.
+                # This is the only way to see whether Claude is scoring near-misses
+                # vs seeing nothing at all.
                 if signal_type not in ("BUY", "SELL"):
+                    logger.info(
+                        "Ruleset scan: %s %s via '%s' -> HOLD (conf=%.2f) | reason: %s",
+                        symbol, timeframe, rs_name, confidence,
+                        (result.get("reasoning") or "")[:300],
+                    )
                     continue
 
-                confidence = result.get("confidence", 0)
                 if confidence < sig_cfg.min_confidence:
+                    logger.info(
+                        "Ruleset scan: %s %s via '%s' -> %s below threshold (conf=%.2f < %.2f) - dropped | reason: %s",
+                        symbol, timeframe, rs_name, signal_type, confidence, sig_cfg.min_confidence,
+                        (result.get("reasoning") or "")[:300],
+                    )
                     continue
 
                 side = signal_type.lower()
@@ -403,6 +509,23 @@ def _scan_rulesets():
                     if tp is None:
                         tp_dist = atr_val * cfg.execution.tp_atr_multiplier
                         tp = price + tp_dist if side == "buy" else price - tp_dist
+
+                # R:R guardrail. Claude's SL/TP placements have run sub-1.5 R:R
+                # often enough to bleed real money (EURUSD SELL: 15/25 trades had
+                # TP closer than SL). The ATR fallback above also defaults to a
+                # 0.8 R:R (sl_atr=2.5, tp_atr=2.0). With ~50% live win rate,
+                # anything below 1.5 R:R is mathematically a losing strategy.
+                # Widen TP to 1.5x risk before persisting.
+                risk_dist = abs(price - sl)
+                reward_dist = abs(price - tp)
+                if risk_dist > 0 and reward_dist < 1.5 * risk_dist:
+                    original_tp = tp
+                    tp = price + 1.5 * risk_dist if side == "buy" else price - 1.5 * risk_dist
+                    logger.info(
+                        "R:R guardrail: %s %s %s reward/risk %.2f < 1.5; widened TP %.5f -> %.5f",
+                        symbol, timeframe, side,
+                        reward_dist / risk_dist, original_tp, tp,
+                    )
 
                 # Persist signal
                 session = get_session()
@@ -439,6 +562,13 @@ def _scan_rulesets():
                     trade_manager.execute_signal(signal_id)
                 except Exception as exc:
                     logger.error("Trade execution error for signal %d: %s", signal_id, exc)
+
+            logger.info(
+                "Ruleset '%s' on %s done: evaluated=%d (claude calls), "
+                "skipped_same_bar=%d, skipped_cooldown=%d, skipped_news=%d",
+                rs_name, timeframe, evaluated,
+                skipped_same_bar, skipped_cooldown, skipped_news,
+            )
 
 
 async def signal_generation_loop(stop_event: asyncio.Event) -> None:

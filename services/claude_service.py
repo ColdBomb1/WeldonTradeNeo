@@ -18,6 +18,53 @@ logger = logging.getLogger(__name__)
 
 _client = None
 
+# Hard allow-list for model names. Any call that passes a model not in this set
+# will be REWRITTEN to the canonical Sonnet model and logged as an error. This
+# is a defense-in-depth safety against accidental Opus usage — every layer of
+# the app should use Sonnet only.
+_ALLOWED_MODELS = {"claude-sonnet-4-6"}
+_CANONICAL_MODEL = "claude-sonnet-4-6"
+
+
+def _enforce_sonnet_only(original_create):
+    """Wrap anthropic.messages.create to block any model outside the allow-list.
+
+    If a disallowed model (e.g. Opus) is requested, the call is rewritten to
+    Sonnet, the adaptive-thinking / max-effort flags are stripped (to avoid
+    carrying expensive-call settings into the downgraded call), and a loud
+    error is logged. This is intentional belt-and-suspenders so a bug in one
+    call site cannot burn tokens on Opus.
+    """
+    def guarded_create(*args, **kwargs):
+        requested_model = kwargs.get("model")
+        if requested_model and requested_model not in _ALLOWED_MODELS:
+            import traceback
+            caller = "unknown"
+            try:
+                stack = traceback.extract_stack(limit=5)
+                if len(stack) >= 2:
+                    caller = f"{stack[-2].filename.split(chr(92))[-1]}:{stack[-2].lineno}"
+            except Exception:
+                pass
+            logger.error(
+                "BLOCKED non-Sonnet model request: requested=%r, rewriting to %s. Caller: %s",
+                requested_model, _CANONICAL_MODEL, caller,
+            )
+            kwargs["model"] = _CANONICAL_MODEL
+            # Strip expensive-call settings so a downgraded call doesn't silently
+            # use Opus-style parameters against Sonnet.
+            kwargs.pop("thinking", None)
+            extra = kwargs.get("extra_body")
+            if isinstance(extra, dict):
+                extra.pop("output_config", None)
+                if not extra:
+                    kwargs.pop("extra_body", None)
+            # Clamp max_tokens too — Opus paths use 16000; Sonnet reasonable cap.
+            if kwargs.get("max_tokens", 0) > 4096:
+                kwargs["max_tokens"] = 4096
+        return original_create(*args, **kwargs)
+    return guarded_create
+
 
 def _get_client():
     global _client
@@ -29,10 +76,30 @@ def _get_client():
         logger.error("anthropic package not installed — run: pip install anthropic")
         return None
     cfg = load_config()
-    if not cfg.claude.api_key:
-        logger.warning("Claude API key not configured")
+    api_key = (cfg.claude.api_key or "").strip()
+    if not api_key:
+        logger.warning("Claude API key not configured in data/config.json")
         return None
-    _client = anthropic.Anthropic(api_key=cfg.claude.api_key)
+    if not api_key.startswith("sk-ant-api"):
+        # Reject anything that isn't a real API key — OAuth tokens (sk-ant-oat…),
+        # session tokens, or stray strings would otherwise fail obscurely at the
+        # first request. Fail loudly at client construction instead.
+        logger.error(
+            "Claude config key does not look like an API key (expected prefix sk-ant-api). "
+            "Refusing to construct client to avoid env-var fallback."
+        )
+        return None
+    # Defense in depth: strip ANTHROPIC_API_KEY from this process's environment
+    # before constructing the SDK client. The SDK falls back to that env var
+    # when api_key is falsy — and any subprocess we spawn would inherit it.
+    # We pass the key explicitly below, so clearing env costs nothing and
+    # guarantees the key never escapes the config.json boundary.
+    import os
+    os.environ.pop("ANTHROPIC_API_KEY", None)
+    client = anthropic.Anthropic(api_key=api_key)
+    # Wrap messages.create with the Sonnet-only guard
+    client.messages.create = _enforce_sonnet_only(client.messages.create)
+    _client = client
     return _client
 
 
@@ -81,17 +148,19 @@ def _extract_text(response) -> str:
 
 
 def _review_create(client, cfg, system: str, prompt: str, **kwargs):
-    """Call Claude with the review model (Opus) + adaptive thinking at max effort.
+    """Call Claude for review/evolve/training analysis.
 
-    Used for review, evolve, and training analysis — the expensive but thorough calls.
+    Previously routed to Opus with adaptive thinking at max effort. That was
+    removed as a safety measure — the app is locked to Sonnet-only. This
+    function now uses the standard Sonnet model and parameters. The output
+    will be less thorough than the old Opus path, but it cannot burn Opus
+    tokens.
     """
     return client.messages.create(
-        model=cfg.claude.review_model,
-        max_tokens=cfg.claude.review_max_tokens,
-        thinking={"type": "adaptive"},
+        model=cfg.claude.model,
+        max_tokens=min(cfg.claude.max_tokens, 4096),
         system=system,
         messages=[{"role": "user", "content": prompt}],
-        extra_body={"output_config": {"effort": "max"}},
         **kwargs,
     )
 
@@ -229,13 +298,13 @@ def analyze_trade_signal(
         f"Open positions:\n{position_text}\n\n"
         f"Upcoming economic events:\n{_format_events(upcoming_events)}\n\n"
         f"Market sentiment: {_format_sentiment(sentiment)}\n\n"
-        f"Respond with a JSON object:\n"
+        f"Respond with a JSON object (keep reasoning short - we store and read it):\n"
         f'{{\n'
         f'  "confidence": 0.0-1.0,\n'
         f'  "recommendation": "execute" | "skip" | "wait",\n'
         f'  "adjusted_sl": <float or null>,\n'
         f'  "adjusted_tp": <float or null>,\n'
-        f'  "reasoning": "<brief explanation>"\n'
+        f'  "reasoning": "<=200 chars: primary factor driving the decision"\n'
         f'}}'
     )
 

@@ -93,7 +93,10 @@ def compute_position_size(
         jpy_rate = 159.0  # approximate — doesn't need to be exact
         volume *= jpy_rate / 2
     # Per-symbol lot caps — normalized to ~$450 max risk per trade
-    max_lots = {"EURUSD": 3.0, "GBPUSD": 2.25, "USDJPY": 2.86}
+    max_lots = {
+        "EURUSD": 3.0, "GBPUSD": 2.25, "USDJPY": 2.86,
+        "USDCHF": 2.5, "AUDUSD": 2.25, "NZDUSD": 2.25, "USDCAD": 3.5,
+    }
     cap = max_lots.get(symbol.upper(), 3.0)
     volume = min(volume, cap)
     return max(round(volume, 2), 0.01)
@@ -243,7 +246,10 @@ def _get_account_balance(account: AccountConfig) -> float:
 
 
 # Normal spread ranges per pair (in pips). Reject if spread exceeds 2x normal.
-_NORMAL_SPREAD = {"EURUSD": 1.5, "GBPUSD": 2.0, "USDJPY": 2.0}
+_NORMAL_SPREAD = {
+    "EURUSD": 1.5, "GBPUSD": 2.0, "USDJPY": 2.0,
+    "USDCHF": 1.8, "AUDUSD": 1.8, "NZDUSD": 2.5, "USDCAD": 2.0,
+}
 _MAX_SPREAD_MULTIPLIER = 2.0
 
 
@@ -371,8 +377,14 @@ def execute_signal(signal_id: int) -> dict:
 
         # Cap SL/TP distances to realistic 15min intraday ranges
         pip_val = 0.01 if "JPY" in sig.symbol.upper() else 0.0001
-        max_sl_pips = {"EURUSD": 15, "GBPUSD": 20, "USDJPY": 25}
-        max_tp_pips = {"EURUSD": 25, "GBPUSD": 35, "USDJPY": 40}
+        max_sl_pips = {
+            "EURUSD": 15, "GBPUSD": 20, "USDJPY": 25,
+            "USDCHF": 15, "AUDUSD": 18, "NZDUSD": 20, "USDCAD": 18,
+        }
+        max_tp_pips = {
+            "EURUSD": 25, "GBPUSD": 35, "USDJPY": 40,
+            "USDCHF": 25, "AUDUSD": 30, "NZDUSD": 35, "USDCAD": 30,
+        }
         sl_cap = max_sl_pips.get(sig.symbol, 20) * pip_val
         tp_cap = max_tp_pips.get(sig.symbol, 30) * pip_val
 

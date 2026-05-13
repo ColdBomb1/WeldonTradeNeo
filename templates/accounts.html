@@ -62,7 +62,16 @@
           <td>{{ account.name }}</td><td>{{ account.account_type }}</td>
           <td>{{ account.login }}</td><td>{{ account.server[:40] }}...</td>
           <td>{% if account.enabled %}<span style="color:#27ae60;font-weight:600">Enabled</span>{% else %}Disabled{% endif %}</td>
-          <td><a href="/accounts/remove?name={{ account.name }}">Remove</a></td>
+          <td>
+            <form method="post" action="/accounts/remove" style="display:inline"
+                  onsubmit="return confirm('Remove account \'{{ account.name }}\'? This cannot be undone.');">
+              <input type="hidden" name="name" value="{{ account.name }}">
+              <button type="submit" class="link-button"
+                      style="background:none;border:none;padding:0;color:#c0392b;cursor:pointer;text-decoration:underline;font:inherit">
+                Remove
+              </button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
       </tbody>

@@ -31,8 +31,14 @@ _CORRELATION = {
     ("GBPUSD", "USDCAD"): -0.45,
     ("AUDUSD", "NZDUSD"): 0.90,
     ("AUDUSD", "USDCAD"): -0.65,
+    ("AUDUSD", "USDJPY"): 0.40,
     ("USDJPY", "USDCHF"): 0.60,
     ("USDJPY", "USDCAD"): 0.50,
+    ("USDCHF", "AUDUSD"): -0.50,
+    ("USDCHF", "NZDUSD"): -0.45,
+    ("USDCHF", "USDCAD"): 0.35,
+    ("NZDUSD", "USDJPY"): 0.35,
+    ("NZDUSD", "USDCAD"): -0.60,
 }
 
 

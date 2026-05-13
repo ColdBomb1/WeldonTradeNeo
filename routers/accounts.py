@@ -55,8 +55,14 @@ async def add_account(request: Request):
     return RedirectResponse(url="/accounts", status_code=303)
 
 
-@router.get("/accounts/remove")
-def remove_account(name: str):
+@router.post("/accounts/remove")
+async def remove_account(request: Request):
+    """Remove an account by name. POST-only — destructive actions must never be GET
+    (browsers prefetch links, security scanners follow links, users misclick)."""
+    form = await request.form()
+    name = str(form.get("name", "")).strip()
+    if not name:
+        return RedirectResponse(url="/accounts", status_code=303)
     cfg = load_config()
     cfg.accounts = [acct for acct in cfg.accounts if acct.name != name]
     save_config(cfg)

@@ -60,6 +60,33 @@ def _merge_bucket(candles: list[dict]) -> dict:
     }
 
 
+_TF_MINUTES = {
+    "1m": 1, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "4h": 240, "1d": 1440,
+}
+
+
+def _snap_ts_to_bar_start(ts: datetime, timeframe: str) -> datetime:
+    """Snap a timestamp DOWN to the start of its containing bar.
+
+    Yahoo returns the in-progress bar with the *poll time* as its ts (e.g.
+    13:08:23 for the 15m bar that started at 13:00). Without snapping, each
+    poll inserts a new row instead of upserting onto the bar boundary,
+    polluting the table with O=H=L=C tick snapshots. Snapping here is the
+    only line of defense — the unique constraint can't dedupe what it sees
+    as distinct timestamps.
+    """
+    tf_min = _TF_MINUTES.get(timeframe)
+    if not tf_min:
+        return ts
+    if tf_min < 60:
+        return ts.replace(minute=(ts.minute // tf_min) * tf_min, second=0, microsecond=0)
+    if tf_min < 1440:
+        bucket_hours = tf_min // 60
+        return ts.replace(hour=(ts.hour // bucket_hours) * bucket_hours, minute=0, second=0, microsecond=0)
+    return ts.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
 def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
     """Fetch OHLCV data from Yahoo and upsert into the candles table.
 
@@ -98,6 +125,7 @@ def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
                 ts = ts_str
             if ts.tzinfo is None:
                 ts = ts.replace(tzinfo=timezone.utc)
+            ts = _snap_ts_to_bar_start(ts, timeframe)
 
             stmt = pg_insert(Candle).values(
                 symbol=symbol,

@@ -16,7 +16,7 @@ from db import get_session
 from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun, TrainingIteration
-from services import claude_service, indicator_service
+from services import claude_service, indicator_service, lessons_service
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +61,49 @@ def get_training_progress(run_id: int) -> dict | None:
 # Rule evaluation
 # ---------------------------------------------------------------------------
 
+# Module-level constant so it's one stable string object across calls. Content
+# identical across every evaluate_rules invocation — cached on the API side
+# by the cache_control mark in evaluate_rules().
+_EVAL_SYSTEM_PROMPT = (
+    "You are a discretionary forex trader analyzing current market conditions.\n\n"
+    "THE CORE TASK: Pattern-match the current moment against the named SETUP TEMPLATES "
+    "in the framework. When a template is a clean match (4-5 of its conditions present), "
+    "recommend the trade. When no template fits, HOLD.\n\n"
+    "Both types of errors cost money:\n"
+    "- Taking a bad trade loses the SL amount.\n"
+    "- Missing a real opportunity loses the move you didn't capture.\n"
+    "Neither answer is 'safer'. Recommend the setup when you see one. HOLD when you don't.\n\n"
+    "MULTI-TIMEFRAME ANALYSIS (critical):\n"
+    "The prompt contains 4h and 1h higher-timeframe summaries. Use them to form "
+    "DIRECTIONAL BIAS FIRST:\n"
+    "  1. Look at the 4h: is it UPTREND, DOWNTREND, or RANGE? That's your primary bias.\n"
+    "  2. Look at the 1h: is it aligned with the 4h, or showing a pullback/consolidation "
+    "  within the 4h trend?\n"
+    "  3. Only THEN look at the 15m entry timeframe for a trigger.\n"
+    "A 15m setup that CONTRADICTS the 1h/4h structure is usually a trap. A 15m setup that "
+    "ALIGNS with higher-TF bias is where real opportunities live. State your 4h/1h read "
+    "explicitly in your reasoning, then explain why the 15m is or isn't confirming it.\n\n"
+    "REPORT YOUR REAL CONVICTION. The confidence field is your honest estimate of setup "
+    "quality on a 0.0-1.0 scale. Do not inflate it to justify a trade. Do not deflate it "
+    "to avoid recommending one. Calibration matters.\n\n"
+    "HOW TO USE RECENT TRADE MEMORY:\n"
+    "- Lessons are DATA POINTS about patterns that worked or failed, not prohibitions.\n"
+    "- A setup that rhymes with a past loss is worth extra scrutiny - but if the CONTEXT "
+    "(trend direction, momentum regime, volatility, session) differs materially, the "
+    "lesson does not apply.\n"
+    "- If the memory block says no prior trades exist, operate from first principles. "
+    "Do not manufacture caution.\n\n"
+    "ANTI-HALLUCINATION: When you cite an indicator value in your reasoning (e.g. \"RSI "
+    "at 54\"), quote it ACCURATELY from the indicators block. Past entries where reasoning "
+    "claimed one value and the data showed another have lost money. If you're not sure of "
+    "an exact value, say \"near X\" rather than a precise number. Be honest about what the "
+    "data actually shows, not what you wish it showed.\n\n"
+    "Indicators include pre-computed boolean flags. Trust them as facts - but a true flag "
+    "is a DATA POINT, not a trigger. You decide whether it matters in this context.\n\n"
+    "Always respond with valid JSON only."
+)
+
+
 def evaluate_rules(
     rules_text: str,
     symbol: str,
@@ -69,8 +112,16 @@ def evaluate_rules(
     indicators: dict[str, Any] | None = None,
     news_events: list[dict] | None = None,
     sentiment: dict | None = None,
+    lessons_text: str | None = None,
+    multi_tf_candles: dict[str, list[dict]] | None = None,
 ) -> dict:
-    """Evaluate trading rules against current market state using Claude.
+    """Evaluate current market state using Claude as a discretionary analyst.
+
+    Rules are treated as a considerations framework + named setup templates —
+    not hard triggers. Recent trade lessons are injected as memory, and when
+    `multi_tf_candles` is provided (e.g. {'1h': [...], '4h': [...]}), higher-
+    timeframe context is included so Claude can form directional bias before
+    scoring the entry-timeframe trigger.
 
     Returns: {"signal": "BUY/SELL/HOLD", "confidence": 0-1,
               "stop_loss": float|None, "take_profit": float|None,
@@ -86,30 +137,65 @@ def evaluate_rules(
     if indicators is None:
         indicators = _compute_indicators(candles)
 
-    prompt = _build_evaluation_prompt(
-        rules_text, symbol, timeframe, candles, indicators, news_events, sentiment,
+    # Pull lessons from recent closed trades (unless caller supplied their own,
+    # e.g. backtest mode where the DB contains no relevant history).
+    if lessons_text is None:
+        try:
+            lessons_text = lessons_service.format_lessons_for_prompt(symbol, days=14)
+        except Exception as exc:
+            logger.warning("Lessons fetch failed for %s: %s", symbol, exc)
+            lessons_text = ""
+
+    static_ctx = _build_static_context(rules_text)
+    dynamic_ctx = _build_dynamic_context(
+        symbol, timeframe, candles, indicators, news_events, sentiment,
+        lessons_text=lessons_text,
+        multi_tf_candles=multi_tf_candles,
     )
 
     try:
+        # Prompt-cache the system prompt and the rules/schema block. The 7
+        # symbols scanned back-to-back at each 15m bar-close share an identical
+        # prefix; caching drops calls 2..7 to ~10% input cost for that prefix.
+        # Default ephemeral TTL is 5 min — the full burst fits well inside it.
         response = client.messages.create(
             model=cfg.claude.model,
             max_tokens=1024,
             temperature=0.2,
-            system=(
-                "You are a forex trading rule interpreter. You receive trading rules and "
-                "pre-computed market indicators. Your job is to check if ANY rule condition "
-                "is met and signal accordingly.\n\n"
-                "IMPORTANT: The indicators include pre-computed boolean flags like "
-                "rsi_crossed_above_30, macd_crossed_bullish, price_near_bb_lower, etc. "
-                "When a rule references one of these flags, check the indicator value directly. "
-                "If the flag is True, the condition IS met — do not second-guess it.\n\n"
-                "Signal BUY or SELL when at least one entry rule condition is satisfied. "
-                "You do NOT need multiple conditions — a single valid trigger is enough.\n"
-                "Only HOLD if zero conditions are met.\n"
-                "Always respond with valid JSON only."
-            ),
-            messages=[{"role": "user", "content": prompt}],
+            system=[
+                {
+                    "type": "text",
+                    "text": _EVAL_SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": static_ctx,
+                            "cache_control": {"type": "ephemeral"},
+                        },
+                        {
+                            "type": "text",
+                            "text": dynamic_ctx,
+                        },
+                    ],
+                }
+            ],
         )
+        usage = getattr(response, "usage", None)
+        if usage is not None:
+            logger.info(
+                "Claude eval %s %s: input=%d cache_read=%d cache_write=%d output=%d",
+                symbol, timeframe,
+                getattr(usage, "input_tokens", 0),
+                getattr(usage, "cache_read_input_tokens", 0),
+                getattr(usage, "cache_creation_input_tokens", 0),
+                getattr(usage, "output_tokens", 0),
+            )
         text = response.content[0].text
         parsed = claude_service._parse_json_response(text)
         if parsed is None:
@@ -127,15 +213,48 @@ def evaluate_rules(
         return {"signal": "HOLD", "confidence": 0, "reasoning": f"Error: {exc}"}
 
 
-def _build_evaluation_prompt(
-    rules_text: str,
+def _build_static_context(rules_text: str) -> str:
+    """Static portion of the evaluation prompt: rules + analysis procedure +
+    output schema. Identical across every call in a bar-close burst, so it
+    lives behind a cache_control mark in evaluate_rules().
+    """
+    return (
+        f"CONSIDERATIONS & FRAMEWORK:\n{rules_text}\n\n"
+        f"ANALYSIS STEPS:\n"
+        f"  1. Read the 4h/1h context (in the market data below). Is the broader trend UP, DOWN, or RANGE? Note key levels.\n"
+        f"  2. Check which SETUP TEMPLATE (from the framework above) best matches THIS moment.\n"
+        f"  3. Score the match: how many of that template's conditions are actually present?\n"
+        f"  4. If 4+ conditions match cleanly, recommend the trade. If 3 or fewer, HOLD.\n\n"
+        f"Reminders:\n"
+        f"  - Your confidence is your honest estimate of setup quality on 0.0-1.0. Report what you "
+        f"actually see.\n"
+        f"  - Missing a real opportunity costs the same as taking a bad trade.\n"
+        f"  - Quote indicator values from the data provided - do not cite values from memory or guess.\n\n"
+        f"Respond with JSON (keep reasoning short - we store and read it):\n"
+        f'{{\n'
+        f'  "signal": "BUY" | "SELL" | "HOLD",\n'
+        f'  "confidence": 0.0-1.0,\n'
+        f'  "stop_loss": <price or null>,\n'
+        f'  "take_profit": <price or null>,\n'
+        f'  "reasoning": "<=200 chars: 4h/1h read, template matched (or none), and decision rationale"\n'
+        f'}}'
+    )
+
+
+def _build_dynamic_context(
     symbol: str,
     timeframe: str,
     candles: list[dict],
     indicators: dict[str, Any],
     news_events: list[dict] | None,
     sentiment: dict | None,
+    lessons_text: str | None = None,
+    multi_tf_candles: dict[str, list[dict]] | None = None,
 ) -> str:
+    """Dynamic per-call portion of the prompt: current market data, candles,
+    indicators, events, sentiment, and per-symbol lessons. Placed AFTER the
+    cached static context so different symbols share the cache prefix.
+    """
     recent = candles[-30:] if len(candles) > 30 else candles
     candle_text = "\n".join(
         "  {time}: O={o:.5f} H={h:.5f} L={l:.5f} C={c:.5f}".format(
@@ -143,6 +262,9 @@ def _build_evaluation_prompt(
         )
         for c in recent
     )
+
+    # Higher-timeframe block (1h, 4h) when available
+    mtf_block = _format_multi_tf_block(symbol, multi_tf_candles or {})
 
     # Separate cross-pair context from technical indicators
     cross_pair_keys = {"cross_pair_summary", "usd_bias"}
@@ -186,27 +308,49 @@ def _build_evaluation_prompt(
             "Already-released events are informational only — do not skip trades because of them.\n\n"
         )
 
+    lessons_block = ""
+    if lessons_text:
+        lessons_block = f"{lessons_text}\n\n"
+
+    now_utc = datetime.now(timezone.utc)
+    session_label = _classify_fx_session(now_utc)
+
     return (
-        f"TRADING RULES:\n{rules_text}\n\n"
-        f"MARKET DATA:\n"
-        f"Symbol: {symbol}, Timeframe: {timeframe}\n"
+        f"{lessons_block}"
+        f"CURRENT MARKET DATA:\n"
+        f"Current UTC time: {now_utc.strftime('%Y-%m-%dT%H:%M:%SZ')} ({session_label})\n"
+        f"Symbol: {symbol}, Entry Timeframe: {timeframe}\n"
         f"Current price: {candles[-1]['close']:.5f}\n\n"
-        f"Recent candles ({timeframe}):\n{candle_text}\n\n"
-        f"Indicators:\n{indicator_text}\n\n"
+        f"{mtf_block}"
+        f"ENTRY-TIMEFRAME DATA ({timeframe}) - use AFTER forming higher-TF bias above:\n"
+        f"Recent {timeframe} candles:\n{candle_text}\n\n"
+        f"{timeframe} indicators (data points - interpret them, don't just react to them):\n{indicator_text}\n\n"
         f"{cross_pair_text}"
         f"Nearby economic events:\n{events_text}\n\n"
         f"{news_guidance}"
-        f"Market sentiment: {sent_text}\n\n"
-        f"Based on your trading rules and this market data, what is your signal?\n\n"
-        f"Respond with JSON:\n"
-        f'{{\n'
-        f'  "signal": "BUY" | "SELL" | "HOLD",\n'
-        f'  "confidence": 0.0-1.0,\n'
-        f'  "stop_loss": <price or null>,\n'
-        f'  "take_profit": <price or null>,\n'
-        f'  "reasoning": "<which rules triggered and why>"\n'
-        f'}}'
+        f"Market sentiment: {sent_text}\n"
     )
+
+
+def _classify_fx_session(now_utc: datetime) -> str:
+    """Label the current FX session based on UTC hour. Use this — do not let
+    Claude infer it from candle timestamps, which it has been getting wrong.
+
+    Reference (UTC): Tokyo 00-09, London 07-16, NY 13-22, Sydney 22-07.
+    The London-NY overlap (13-16 UTC) carries the most volume.
+    """
+    h = now_utc.hour
+    if 13 <= h < 16:
+        return "London-NY overlap, peak volume window"
+    if 7 <= h < 13:
+        return "London session active, NY pre-market"
+    if 16 <= h < 21:
+        return "NY session, post-London"
+    if 21 <= h < 24:
+        return "post-NY, Sydney/Asian opening, low liquidity"
+    if 0 <= h < 7:
+        return "Asian session (Tokyo/Sydney), pre-London"
+    return "session transition"
 
 
 def _compute_indicators(candles: list[dict]) -> dict:
@@ -339,6 +483,136 @@ def _compute_indicators(candles: list[dict]) -> dict:
             pass
 
     return result
+
+
+def _pip_value_for(symbol: str) -> float:
+    """Match trade_manager._pip_value — kept local to avoid cross-module import."""
+    return 0.01 if "JPY" in symbol.upper() else 0.0001
+
+
+def _compute_tf_summary(symbol: str, candles: list[dict]) -> dict:
+    """Compute a compact higher-timeframe summary block for inclusion in prompts.
+
+    Returns a dict with:
+      - 'ohlc_rows':    last 10 bars formatted for the prompt
+      - 'trend':        'UPTREND' | 'DOWNTREND' | 'RANGE'
+      - 'key_indicators': one-line indicator snapshot
+      - 'structure':    swing high/low with pip distance from current price
+      - 'last_time':    timestamp of latest bar
+    """
+    if not candles:
+        return {}
+    closes = [c["close"] for c in candles]
+    price = closes[-1]
+    pip = _pip_value_for(symbol)
+
+    # Indicator snapshot
+    ema20 = indicator_service.ema(closes, 20)
+    ema50 = indicator_service.ema(closes, 50) if len(closes) >= 50 else None
+    ema200 = indicator_service.ema(closes, 200) if len(closes) >= 200 else None
+    rsi = indicator_service.rsi(closes, 14)
+    macd = indicator_service.macd(closes)
+    atr = indicator_service.atr(candles, 14)
+
+    e20 = ema20[-1] if ema20 and ema20[-1] is not None else None
+    e50 = ema50[-1] if ema50 and ema50[-1] is not None else None
+    e200 = ema200[-1] if ema200 and ema200[-1] is not None else None
+    r = rsi[-1] if rsi and rsi[-1] is not None else None
+    mh = macd["histogram"][-1] if macd and macd["histogram"][-1] is not None else None
+    a = atr[-1] if atr and atr[-1] is not None else None
+
+    atr_avg = None
+    atr_ratio = None
+    if atr:
+        atr_clean = [v for v in atr if v is not None]
+        if len(atr_clean) >= 20:
+            atr_avg = sum(atr_clean[-20:]) / 20
+            if atr_avg > 0 and a is not None:
+                atr_ratio = a / atr_avg
+
+    # Trend classification from EMA alignment + price location
+    trend = "RANGE"
+    if e20 is not None and e50 is not None:
+        if e200 is not None:
+            if e20 > e50 > e200 and price > e50:
+                trend = "UPTREND"
+            elif e20 < e50 < e200 and price < e50:
+                trend = "DOWNTREND"
+        else:
+            if e20 > e50 and price > e50:
+                trend = "UPTREND"
+            elif e20 < e50 and price < e50:
+                trend = "DOWNTREND"
+
+    # Structure: swing high / swing low over last 20 bars
+    window = candles[-20:] if len(candles) >= 20 else candles
+    swing_high = max(c["high"] for c in window)
+    swing_low = min(c["low"] for c in window)
+    sh_dist = (swing_high - price) / pip
+    sl_dist = (price - swing_low) / pip
+
+    # Last 10 bars text
+    recent = candles[-10:]
+    ohlc_rows = "\n".join(
+        "    {time}: O={o:.5f} H={h:.5f} L={l:.5f} C={c:.5f}".format(
+            time=c.get("time", "?"), o=c["open"], h=c["high"], l=c["low"], c=c["close"],
+        )
+        for c in recent
+    )
+
+    # One-line indicator text
+    parts = []
+    if e20 is not None:
+        parts.append(f"ema_20={e20:.5f}")
+    if e50 is not None:
+        parts.append(f"ema_50={e50:.5f}")
+    if e200 is not None:
+        parts.append(f"ema_200={e200:.5f}")
+    if r is not None:
+        parts.append(f"rsi_14={r:.2f}")
+    if mh is not None:
+        parts.append(f"macd_hist={mh:+.6f}")
+    if atr_ratio is not None:
+        parts.append(f"atr_vs_avg={atr_ratio:.2f}x")
+    key_indicators = ", ".join(parts) if parts else "(insufficient history)"
+
+    structure = (
+        f"swing_high={swing_high:.5f} ({sh_dist:+.1f} pips), "
+        f"swing_low={swing_low:.5f} ({sl_dist:+.1f} pips below)"
+    )
+
+    return {
+        "ohlc_rows": ohlc_rows,
+        "trend": trend,
+        "key_indicators": key_indicators,
+        "structure": structure,
+        "last_time": candles[-1].get("time", "?"),
+    }
+
+
+def _format_multi_tf_block(symbol: str, multi_tf_candles: dict[str, list[dict]]) -> str:
+    """Format 4h/1h context summaries for the prompt. Returns empty string if nothing to show."""
+    if not multi_tf_candles:
+        return ""
+    # Show 4h first (broader context), then 1h
+    order = ["4h", "1h"]
+    sections = []
+    for tf in order:
+        bars = multi_tf_candles.get(tf)
+        if not bars or len(bars) < 20:
+            continue
+        s = _compute_tf_summary(symbol, bars)
+        if not s:
+            continue
+        sections.append(
+            f"  {tf} (as of {s['last_time']}, trend={s['trend']}):\n"
+            f"    Structure: {s['structure']}\n"
+            f"    Indicators: {s['key_indicators']}\n"
+            f"    Last 10 bars:\n{s['ohlc_rows']}"
+        )
+    if not sections:
+        return ""
+    return "HIGHER TIMEFRAME CONTEXT:\n" + "\n\n".join(sections) + "\n\n"
 
 
 def compute_cross_pair_context(

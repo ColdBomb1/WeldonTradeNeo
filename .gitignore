@@ -213,3 +213,7 @@ apps/**/data/keys/
 # Runtime config with credentials (API keys, passwords, account numbers)
 data/config.json
 data/*.json
+apikey.txt
+
+# Application logs (file handler in main.py)
+logs/

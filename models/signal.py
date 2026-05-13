@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, JSON, String, ForeignKey
+from sqlalchemy import DateTime, Float, Integer, JSON, String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -20,7 +20,10 @@ class Signal(Base):
     stop_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
     take_profit: Mapped[float | None] = mapped_column(Float, nullable=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    reason: Mapped[str] = mapped_column(String(512), default="")
+    # Unbounded: Claude's multi-TF reasoning can run 2-3KB; VARCHAR(512) was
+    # truncating inserts and rolling back the whole signal. create_all() won't
+    # migrate existing columns, so an ALTER was applied manually.
+    reason: Mapped[str] = mapped_column(Text, default="")
     claude_analysis: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(32), default="pending", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)

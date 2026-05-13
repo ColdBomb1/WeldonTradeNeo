@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(psql -h localhost -U postgres -d weldon_trader -c ':*)",
+      "Read(//c/Users/Administrator/.claude/**)",
+      "Bash(env)",
+      "PowerShell($user = [Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_API_KEY\", \"User\"\\); $machine = [Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_API_KEY\", \"Machine\"\\); Write-Output \"USER-LEVEL: $\\(if \\($user\\) { 'SET \\(len=' + $user.Length + '\\)' } else { 'not set' }\\)\"; Write-Output \"MACHINE-LEVEL: $\\(if \\($machine\\) { 'SET \\(len=' + $machine.Length + '\\)' } else { 'not set' }\\)\"; Write-Output \"---OTHER RELATED VARS---\"; Get-ChildItem Env: | Where-Object { $_.Name -match 'ANTHROPIC|CLAUDE' } | ForEach-Object { Write-Output \\($_.Name + ' = <redacted len=' + $_.Value.Length + '>'\\) })",
+      "Bash(curl -s -o /dev/null -w \"HTTP %{http_code}\\\\n\" http://localhost:8000/ --max-time 3)",
+      "Bash(tasklist //FI \"IMAGENAME eq python.exe\")",
+      "Bash(claude --version)",
+      "Bash(claude config *)",
+      "PowerShell($user = [Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_API_KEY\", \"User\"\\); $machine = [Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_API_KEY\", \"Machine\"\\); $process = [Environment]::GetEnvironmentVariable\\(\"ANTHROPIC_API_KEY\", \"Process\"\\); Write-Output \"USER scope:    $\\(if \\($user\\) { 'SET \\(len=' + $user.Length + ', prefix=' + $user.Substring\\(0,[Math]::Min\\(8,$user.Length\\)\\) + '\\)' } else { 'not set' }\\)\"; Write-Output \"MACHINE scope: $\\(if \\($machine\\) { 'SET \\(len=' + $machine.Length + ', prefix=' + $machine.Substring\\(0,[Math]::Min\\(8,$machine.Length\\)\\) + '\\)' } else { 'not set' }\\)\"; Write-Output \"PROCESS scope: $\\(if \\($process\\) { 'SET \\(len=' + $process.Length + ', prefix=' + $process.Substring\\(0,[Math]::Min\\(8,$process.Length\\)\\) + '\\)' } else { 'not set' }\\)\")",
+      "Bash(psql -h localhost -U postgres -d weldon_trader -c \"SELECT id, name, length\\(rules_text\\) as rules_len, substring\\(rules_text from 1 for 600\\) as rules_preview FROM rulesets WHERE name = 'Base RSI to Evolve' LIMIT 1;\")",
+      "Bash(psql -h localhost -U postgres -d weldon_trader -c \"SELECT symbol, timeframe, signal_type, confidence, substring\\(reason from 1 for 250\\) as reason_preview, created_at FROM signals WHERE created_at > NOW\\(\\) - INTERVAL '2 hours' ORDER BY created_at DESC LIMIT 8;\")",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d weldon_trader -c \"SELECT id, name, length\\(rules_text\\) as rules_len FROM rulesets WHERE name = 'Base RSI to Evolve' LIMIT 1;\")",
+      "Bash(PGPASSWORD=postgres psql -h localhost -U postgres -d weldon_trader -c \"\\\\dt\")"
     ]
   }
 }

@@ -8,11 +8,36 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import logging.handlers
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
+
+BASE_DIR = Path(__file__).resolve().parent
+
+# Configure logging once: stream to stderr (uvicorn's default surface) AND
+# rotate to logs/app.log so the running session's output can be inspected
+# after the fact without scrolling the terminal.
+_LOG_DIR = BASE_DIR / "logs"
+_LOG_DIR.mkdir(parents=True, exist_ok=True)
+_root = logging.getLogger()
+_root.setLevel(logging.INFO)
+if not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in _root.handlers):
+    _fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+    _file_handler = logging.handlers.RotatingFileHandler(
+        _LOG_DIR / "app.log",
+        maxBytes=10 * 1024 * 1024,  # 10 MB
+        backupCount=3,
+        encoding="utf-8",
+    )
+    _file_handler.setFormatter(_fmt)
+    _root.addHandler(_file_handler)
+    if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.handlers.RotatingFileHandler) for h in _root.handlers):
+        _stream_handler = logging.StreamHandler()
+        _stream_handler.setFormatter(_fmt)
+        _root.addHandler(_stream_handler)
 
 from config import load_config
 from db import init_db
@@ -23,10 +48,6 @@ from services.news_service import news_collection_loop
 from routers.accounts import account_snapshot_loop
 
 from routers import marketdata, history, candles, indicators, accounts, settings, trade_plans, signals, trades, news, analytics, training, rulesets
-
-logging.basicConfig(level=logging.INFO)
-
-BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(title="WeldonTrader")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")

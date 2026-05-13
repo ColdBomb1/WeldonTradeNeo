@@ -33,12 +33,30 @@ class AccountConfig(BaseModel):
 
 class ClaudeConfig(BaseModel):
     api_key: str = ""
-    model: str = "claude-sonnet-4-20250514"
-    review_model: str = "claude-opus-4-6"
+    model: str = "claude-sonnet-4-6"
+    # review_model previously was an Opus variant for deep-review calls. It is
+    # now forced to Sonnet — see services/claude_service._enforce_sonnet_only.
+    # Any value other than Sonnet is rejected by the validator below.
+    review_model: str = "claude-sonnet-4-6"
     max_tokens: int = 4096
-    review_max_tokens: int = 16000
+    review_max_tokens: int = 4096
     temperature: float = 0.3
     enabled: bool = False
+
+    @field_validator("model", "review_model", mode="after")
+    @classmethod
+    def _sonnet_only(cls, value: str) -> str:
+        # Hard lock: only Sonnet models allowed. Anything else — including an
+        # old config.json with Opus in it — gets rewritten at load time. This
+        # pairs with the runtime guard in claude_service._enforce_sonnet_only.
+        allowed = "claude-sonnet-4-6"
+        if value != allowed:
+            import logging
+            logging.getLogger(__name__).error(
+                "Claude model %r is not allowed; forcing to %s", value, allowed,
+            )
+            return allowed
+        return value
 
 
 class SignalConfig(BaseModel):
