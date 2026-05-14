@@ -37,6 +37,12 @@ DEFAULT_SETTINGS = {
     "spread_pips": 1.5,
     "risk_per_trade_pct": 0.35,
     "lot_type": "mini",
+    "realistic_execution": True,
+    "entry_timing": "next_open",
+    "slippage_pips": 0.2,
+    "min_sl_pips": 10.0,
+    "enforce_live_exit_policy": True,
+    "broker_lot_units": 100000,
     "min_train_trades": 20,
     "min_train_profit_factor": 1.0,
     "min_train_return_pct": 0.0,
@@ -142,6 +148,19 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["initial_balance"] = max(1000.0, float(settings["initial_balance"]))
     settings["spread_pips"] = max(0.0, min(20.0, float(settings["spread_pips"])))
     settings["risk_per_trade_pct"] = max(0.05, min(5.0, float(settings["risk_per_trade_pct"])))
+    settings["realistic_execution"] = _coerce_bool(settings["realistic_execution"])
+    if str(settings.get("entry_timing", "")).lower() not in {"signal_close", "next_open"}:
+        settings["entry_timing"] = DEFAULT_SETTINGS["entry_timing"]
+    else:
+        settings["entry_timing"] = str(settings["entry_timing"]).lower()
+    settings["slippage_pips"] = max(0.0, min(10.0, float(settings["slippage_pips"])))
+    settings["min_sl_pips"] = max(0.0, min(100.0, float(settings["min_sl_pips"])))
+    settings["enforce_live_exit_policy"] = _coerce_bool(settings["enforce_live_exit_policy"])
+    broker_lot_units = settings.get("broker_lot_units")
+    settings["broker_lot_units"] = (
+        None if broker_lot_units in {None, "", 0, "0"}
+        else max(1000, min(1000000, int(broker_lot_units)))
+    )
     settings["min_train_trades"] = max(1, min(10000, int(settings["min_train_trades"])))
     settings["min_train_profit_factor"] = max(0.1, min(10.0, float(settings["min_train_profit_factor"])))
     settings["min_train_return_pct"] = max(-50.0, min(100.0, float(settings["min_train_return_pct"])))
@@ -193,6 +212,18 @@ def _coerce_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in {"0", "false", "no", "off"}
     return bool(value)
+
+
+def _backtest_execution_kwargs(settings: dict) -> dict:
+    if not _coerce_bool(settings.get("realistic_execution")):
+        return {}
+    return {
+        "entry_timing": settings.get("entry_timing", "next_open"),
+        "slippage_pips": float(settings.get("slippage_pips") or 0.0),
+        "min_sl_pips": float(settings.get("min_sl_pips") or 0.0),
+        "enforce_live_exit_policy": _coerce_bool(settings.get("enforce_live_exit_policy")),
+        "broker_lot_units": settings.get("broker_lot_units"),
+    }
 
 
 def default_genome() -> dict:
@@ -528,6 +559,7 @@ def evaluate_genome(
                 sl_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)),
                 tp_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)) * float(genome.get("tp_rr", 1.7)),
                 monthly_max_loss_pct=settings["max_drawdown_pct"],
+                **_backtest_execution_kwargs(settings),
             )
             results.append((symbol, run_backtest(config, window_candles)))
     return aggregate_results(results, settings)
@@ -562,6 +594,7 @@ def evaluate_rolling_holdout(
                 sl_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)),
                 tp_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)) * float(genome.get("tp_rr", 1.7)),
                 monthly_max_loss_pct=settings["max_drawdown_pct"],
+                **_backtest_execution_kwargs(settings),
             )
             result = run_backtest(config, window_candles)
             results.append((symbol, result))
