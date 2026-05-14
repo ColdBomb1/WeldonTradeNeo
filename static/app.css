@@ -216,6 +216,18 @@ textarea {
 .button-wrap {
   display: flex;
   align-items: end;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.milestone-actions {
+  grid-column: 1 / -1;
+  align-items: stretch;
+}
+
+.milestone-actions button {
+  flex: 1 1 170px;
 }
 
 .chart-wrap {
