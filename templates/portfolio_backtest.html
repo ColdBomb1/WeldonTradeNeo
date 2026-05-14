@@ -26,7 +26,7 @@
         <button type="button" id="run-btn">Backtest Current Portfolio</button>
       </div>
     </div>
-    <p class="small" id="status-msg"></p>
+    <p class="small" id="status-msg">Idle. No backtest has been run for this view.</p>
   </section>
 
   <section class="card">
@@ -61,7 +61,7 @@
       <div class="status-item"><span class="status-label">30d Return</span><span class="status-value">--</span></div>
       <div class="status-item"><span class="status-label">Worst DD</span><span class="status-value">--</span></div>
     </div>
-    <p class="small" id="milestone-msg"></p>
+    <p class="small" id="milestone-msg">Idle. No milestone check has been run for this view.</p>
     <table class="table" id="candidate-search-table">
       <thead>
         <tr>
@@ -506,7 +506,5 @@
   document.getElementById('search-btn').addEventListener('click', searchCandidates);
   document.getElementById('validate-best-btn').addEventListener('click', validateBestPortfolio);
   document.getElementById('promote-best-btn').addEventListener('click', promoteBestPortfolio);
-  runBacktest();
-  runMilestone();
 </script>
 {% endblock %}
