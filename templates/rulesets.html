@@ -52,6 +52,27 @@
   </section>
 
   <section class="card">
+    <h2>Active Strategy Portfolio</h2>
+    <table class="table" id="portfolio-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Scope</th>
+          <th>Engine</th>
+          <th>Risk / Trade</th>
+          <th>Rolling</th>
+          <th>Holdout</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr><td colspan="8" class="small">Loading...</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card">
     <h2>Rule Sets</h2>
     <table class="table" id="rs-table">
       <thead>
@@ -220,6 +241,66 @@
     return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
   }
 
+  function fmtReturnPct(v) {
+    if (v == null) return '--';
+    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="font-weight:600;color:${c}">${v.toFixed(2)}%</span>`;
+  }
+
+  function fmtDecimalPct(v) {
+    if (v == null) return '--';
+    return `${(v * 100).toFixed(1)}%`;
+  }
+
+  function validationPayload(rs) {
+    const params = rs.parameters || {};
+    const pm = rs.performance_metrics || {};
+    return params.validation || pm.validation || {};
+  }
+
+  function validationMetrics(rs, key) {
+    const validation = validationPayload(rs);
+    const metrics = validation.metrics || {};
+    return metrics[key] || {};
+  }
+
+  function renderPortfolio(rulesets) {
+    const tbody = document.querySelector('#portfolio-table tbody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    const active = (rulesets || []).filter(rs => rs.status === 'active');
+    if (!active.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No active strategies. Promote validated candidates to build the portfolio.</td></tr>';
+      return;
+    }
+    active.forEach(rs => {
+      const params = rs.parameters || {};
+      const criteria = validationPayload(rs).criteria || {};
+      const rolling = validationMetrics(rs, 'rolling_holdout');
+      const holdout = validationMetrics(rs, 'holdout');
+      const rollingText = rolling.rolling_window_count != null
+        ? `${rolling.rolling_window_passes || 0}/${rolling.rolling_window_count} ${fmtReturnPct(rolling.return_pct)} PF ${rolling.profit_factor?.toFixed(2) ?? '--'}`
+        : '--';
+      const holdoutText = holdout.total_trades != null
+        ? `${fmtReturnPct(holdout.return_pct)} PF ${holdout.profit_factor?.toFixed(2) ?? '--'} DD ${fmtDecimalPct(holdout.max_drawdown)}`
+        : '--';
+      const row = document.createElement('tr');
+      row.style.cursor = 'pointer';
+      row.innerHTML = `
+        <td>${rs.id}</td>
+        <td>${rs.name}</td>
+        <td>${(rs.symbols||[]).join(', ') || '--'}<br><span class="small">${(rs.timeframes||[]).join(', ') || '--'}</span></td>
+        <td>${params.execution_engine === 'research_genome' ? 'structured' : 'rules'}</td>
+        <td>${criteria.risk_per_trade_pct != null ? criteria.risk_per_trade_pct.toFixed(2)+'%' : '--'}</td>
+        <td>${rollingText}</td>
+        <td>${holdoutText}</td>
+        <td><button onclick="event.stopPropagation();toggleStatus(${rs.id},'deactivate')">Deactivate</button></td>
+      `;
+      row.addEventListener('click', () => showDetail(rs.id));
+      tbody.appendChild(row);
+    });
+  }
+
   function renderValidation(rs) {
     const el = document.getElementById('validation-display');
     if (!el) return;
@@ -246,6 +327,7 @@
     const tbody = document.querySelector('#rs-table tbody');
     tbody.innerHTML = '';
     const rulesets = data.rulesets || [];
+    renderPortfolio(rulesets);
     if (!rulesets.length) {
       tbody.innerHTML = '<tr><td colspan="8" class="small">No rule sets yet. Create one above.</td></tr>';
       return;
@@ -322,7 +404,7 @@
     loadRulesets();
   }
   async function promoteRs(id) {
-    if (!confirm('Promote this validated candidate to active? Other active rulesets will be deactivated.')) return;
+    if (!confirm('Promote this validated candidate to active? Active rulesets with the same symbol/timeframe scope will be deactivated.')) return;
     const resp = await fetch(`/api/rulesets/${id}/promote`, { method: 'POST' });
     const data = await resp.json();
     if (data.error) { alert(data.error); return; }

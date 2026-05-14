@@ -68,6 +68,36 @@ def _structured_promotion_blocker(rs: RuleSet) -> str | None:
     return None
 
 
+def _normalized_symbols(rs: RuleSet) -> set[str]:
+    return {str(symbol).upper() for symbol in (rs.symbols or []) if str(symbol).strip()}
+
+
+def _normalized_timeframes(rs: RuleSet) -> set[str]:
+    return {str(timeframe).lower() for timeframe in (rs.timeframes or []) if str(timeframe).strip()}
+
+
+def _ruleset_scopes_conflict(left: RuleSet, right: RuleSet) -> bool:
+    if left.id == right.id:
+        return False
+    left_symbols = _normalized_symbols(left)
+    right_symbols = _normalized_symbols(right)
+    left_timeframes = _normalized_timeframes(left)
+    right_timeframes = _normalized_timeframes(right)
+    if not left_symbols or not right_symbols or not left_timeframes or not right_timeframes:
+        return True
+    return bool(left_symbols & right_symbols) and bool(left_timeframes & right_timeframes)
+
+
+def _deactivate_conflicting_active_rulesets(session, target: RuleSet, now: datetime) -> list[int]:
+    deactivated_ids = []
+    for other in session.query(RuleSet).filter(RuleSet.status == "active").all():
+        if _ruleset_scopes_conflict(target, other):
+            other.status = "inactive"
+            other.updated_at = now
+            deactivated_ids.append(other.id)
+    return deactivated_ids
+
+
 def _validation_criteria(payload: dict, rs: RuleSet, initial_balance: float) -> dict:
     cfg = load_config()
     params = rs.parameters or {}
@@ -339,10 +369,16 @@ def activate_ruleset(rs_id: int) -> JSONResponse:
                 {"error": "Candidate rulesets must pass validation and be promoted explicitly."},
                 status_code=400,
             )
+        now = datetime.now(timezone.utc)
+        deactivated_ids = _deactivate_conflicting_active_rulesets(session, rs, now)
         rs.status = "active"
-        rs.updated_at = datetime.now(timezone.utc)
+        rs.updated_at = now
         session.commit()
-        return JSONResponse({"ok": True, "status": "active"})
+        return JSONResponse({
+            "ok": True,
+            "status": "active",
+            "deactivated_conflicting_ruleset_ids": deactivated_ids,
+        })
     except Exception:
         session.rollback()
         raise
@@ -367,22 +403,27 @@ def promote_ruleset(rs_id: int) -> JSONResponse:
             return JSONResponse({"error": blocker}, status_code=400)
 
         now = datetime.now(timezone.utc)
-        for other in session.query(RuleSet).filter(RuleSet.status == "active").all():
-            if other.id != rs.id:
-                other.status = "inactive"
-                other.updated_at = now
+        deactivated_ids = _deactivate_conflicting_active_rulesets(session, rs, now)
 
         params = dict(rs.parameters or {})
         params["promotion"] = {
             "promoted_at": now.isoformat(),
             "previous_status": rs.status,
-            "deactivated_other_active_rulesets": True,
+            "deactivated_conflicting_active_rulesets": deactivated_ids,
+            "portfolio_scope": {
+                "symbols": sorted(_normalized_symbols(rs)),
+                "timeframes": sorted(_normalized_timeframes(rs)),
+            },
         }
         rs.parameters = params
         rs.status = "active"
         rs.updated_at = now
         session.commit()
-        return JSONResponse({"ok": True, "status": "active"})
+        return JSONResponse({
+            "ok": True,
+            "status": "active",
+            "deactivated_conflicting_ruleset_ids": deactivated_ids,
+        })
     except Exception:
         session.rollback()
         raise
