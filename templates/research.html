@@ -107,6 +107,7 @@
           <th>Validation</th>
           <th>Holdout</th>
           <th>Rolling</th>
+          <th>Recent</th>
           <th>Confirm</th>
           <th>Stress</th>
           <th>Ruleset</th>
@@ -165,6 +166,11 @@
     return `${fmtMetric(exact)}<br><span class="small">neighbors ${m.neighbor_passes || 0}/${m.neighbor_count} ${ratio}</span>`;
   }
 
+  function fmtRecentMetric(m) {
+    if (!m || !m.short || !m.long) return '--';
+    return `14d ${fmtMetric(m.short)}<br>30d ${fmtMetric(m.long)}`;
+  }
+
   function compactReasons(reasons) {
     if (!reasons || !reasons.length) return '--';
     return reasons.slice(0, 3).join(' ');
@@ -211,6 +217,7 @@
     const vm = best.validation_metrics || {};
     const hm = best.holdout_metrics || {};
     const rhm = best.rolling_holdout_metrics || {};
+    const rwm = best.recent_window_metrics || {};
     const cm = best.confirmation_metrics || {};
     const hsm = best.holdout_stress_metrics || best.validation_stress_metrics || {};
     const bestGroup = best.symbol_group || 'global';
@@ -224,6 +231,7 @@
       <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${fmtMetric(vm)}</span></div>
       <div class="status-item"><span class="status-label">Holdout</span><span class="status-value">${fmtMetric(hm)}</span></div>
       <div class="status-item"><span class="status-label">Rolling</span><span class="status-value">${fmtRollingMetric(rhm)}</span></div>
+      <div class="status-item"><span class="status-label">Recent</span><span class="status-value">${fmtRecentMetric(rwm)}</span></div>
       <div class="status-item"><span class="status-label">Confirm</span><span class="status-value">${fmtConfirmMetric(cm)}</span></div>
       <div class="status-item"><span class="status-label">Stress</span><span class="status-value">${fmtMetric(hsm)}</span></div>
       <div class="status-item"><span class="status-label">Ruleset</span><span class="status-value">${run.candidate_ruleset_id ? '#'+run.candidate_ruleset_id : '--'}</span></div>
@@ -236,6 +244,7 @@
       const m = c.validation_metrics || {};
       const hm = c.holdout_metrics || {};
       const rhm = c.rolling_holdout_metrics || {};
+      const rwm = c.recent_window_metrics || {};
       const cm = c.confirmation_metrics || {};
       const sm = c.holdout_stress_metrics || c.validation_stress_metrics || {};
       const row = document.createElement('tr');
@@ -248,6 +257,7 @@
         <td>${fmtMetric(m)}</td>
         <td>${fmtMetric(hm)}</td>
         <td>${fmtRollingMetric(rhm)}</td>
+        <td>${fmtRecentMetric(rwm)}</td>
         <td>${fmtConfirmMetric(cm)}</td>
         <td>${fmtMetric(sm)}</td>
         <td>${c.ruleset_id ? `<a href="/rulesets" onclick="event.stopPropagation()">#${c.ruleset_id}</a>` : '--'}</td>

@@ -67,6 +67,14 @@ DEFAULT_SETTINGS = {
     "rolling_holdout_days": 14,
     "rolling_holdout_step_days": 14,
     "min_rolling_holdout_pass_ratio": 0.67,
+    "recent_window_enabled": True,
+    "recent_short_days": 14,
+    "recent_long_days": 30,
+    "min_recent_short_return_pct": 0.35,
+    "min_recent_long_return_pct": 0.85,
+    "min_recent_short_trades": 4,
+    "min_recent_long_trades": 8,
+    "min_recent_profit_factor": 1.05,
     "confirmation_enabled": True,
     "confirmation_variants": 6,
     "confirmation_mutation_rate": 0.08,
@@ -203,6 +211,23 @@ def normalize_settings(raw: dict | None) -> dict:
         0.0,
         min(1.0, float(settings["min_rolling_holdout_pass_ratio"])),
     )
+    settings["recent_window_enabled"] = _coerce_bool(settings["recent_window_enabled"])
+    settings["recent_short_days"] = max(1, min(120, int(settings["recent_short_days"])))
+    settings["recent_long_days"] = max(
+        settings["recent_short_days"],
+        min(180, int(settings["recent_long_days"])),
+    )
+    settings["min_recent_short_return_pct"] = max(
+        -50.0,
+        min(100.0, float(settings["min_recent_short_return_pct"])),
+    )
+    settings["min_recent_long_return_pct"] = max(
+        -50.0,
+        min(100.0, float(settings["min_recent_long_return_pct"])),
+    )
+    settings["min_recent_short_trades"] = max(0, min(10000, int(settings["min_recent_short_trades"])))
+    settings["min_recent_long_trades"] = max(0, min(10000, int(settings["min_recent_long_trades"])))
+    settings["min_recent_profit_factor"] = max(0.1, min(10.0, float(settings["min_recent_profit_factor"])))
     settings["confirmation_enabled"] = _coerce_bool(settings["confirmation_enabled"])
     settings["confirmation_variants"] = max(1, min(24, int(settings["confirmation_variants"])))
     settings["confirmation_mutation_rate"] = max(0.01, min(0.35, float(settings["confirmation_mutation_rate"])))
@@ -547,6 +572,12 @@ def _evaluate_candidate(
         rolling_holdout = evaluate_rolling_holdout(genome, group_candles, timeframe, settings)
         rolling_holdout_gate = score_rolling_holdout(rolling_holdout, settings)
 
+    recent_windows = None
+    recent_windows_gate = {"passed": True, "status": "passed", "reasons": []}
+    if settings["recent_window_enabled"]:
+        recent_windows = evaluate_recent_windows(genome, group_candles, timeframe, settings)
+        recent_windows_gate = score_recent_windows(recent_windows, settings)
+
     gates = {
         "train": train_gate,
         "validation": validation_gate,
@@ -554,6 +585,7 @@ def _evaluate_candidate(
         "holdout": holdout_gate,
         "holdout_stress": holdout_stress_gate,
         "rolling_holdout": rolling_holdout_gate,
+        "recent_windows": recent_windows_gate,
     }
     confirmation = None
     if settings["confirmation_enabled"]:
@@ -579,6 +611,7 @@ def _evaluate_candidate(
         "holdout_metrics": holdout,
         "holdout_stress_metrics": holdout_stress,
         "rolling_holdout_metrics": rolling_holdout,
+        "recent_window_metrics": recent_windows,
         "confirmation_metrics": confirmation,
         "gates": gates,
         "score": _candidate_selection_score(
@@ -588,6 +621,7 @@ def _evaluate_candidate(
             holdout=holdout,
             holdout_stress=holdout_stress,
             rolling_holdout=rolling_holdout,
+            recent_windows=recent_windows,
             confirmation=confirmation,
         ),
         "passed": not reasons,
@@ -689,6 +723,83 @@ def evaluate_rolling_holdout(
     metrics["rolling_window_passes"] = passes
     metrics["rolling_window_pass_ratio"] = round(passes / count, 3) if count else 0.0
     metrics["rolling_windows"] = window_summaries
+    return metrics
+
+
+def evaluate_recent_windows(
+    genome: dict,
+    candles_by_symbol: dict[str, list[dict]],
+    timeframe: str,
+    settings: dict,
+) -> dict:
+    short_days = int(settings["recent_short_days"])
+    long_days = int(settings["recent_long_days"])
+    return {
+        "short": evaluate_recent_window(genome, candles_by_symbol, timeframe, settings, short_days),
+        "long": evaluate_recent_window(genome, candles_by_symbol, timeframe, settings, long_days),
+    }
+
+
+def evaluate_recent_window(
+    genome: dict,
+    candles_by_symbol: dict[str, list[dict]],
+    timeframe: str,
+    settings: dict,
+    days: int,
+) -> dict:
+    if not candles_by_symbol:
+        return aggregate_results([], settings)
+    try:
+        common_end = min(_parse_dt(candles[-1]["time"]) for candles in candles_by_symbol.values() if candles)
+    except ValueError:
+        return aggregate_results([], settings)
+
+    start_ts = common_end - timedelta(days=days)
+    results: list[tuple[str, BacktestResults]] = []
+    windows = []
+    for symbol, candles in candles_by_symbol.items():
+        window_candles = [
+            candle for candle in candles
+            if start_ts <= _parse_dt(candle["time"]) <= common_end
+        ]
+        if len(window_candles) < int(settings["min_holdout_bars"]):
+            continue
+        config = BacktestConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_type="research_genome",
+            parameters=genome,
+            start_date=_parse_dt(window_candles[0]["time"]),
+            end_date=_parse_dt(window_candles[-1]["time"]),
+            initial_balance=settings["initial_balance"],
+            spread_pips=float(settings["spread_pips"]),
+            pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
+            lot_type=settings["lot_type"],
+            risk_per_trade_pct=settings["risk_per_trade_pct"],
+            sl_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)),
+            tp_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)) * float(genome.get("tp_rr", 1.7)),
+            monthly_max_loss_pct=settings["max_drawdown_pct"],
+            **_backtest_execution_kwargs(settings),
+        )
+        result = run_backtest(config, window_candles)
+        results.append((symbol, result))
+        windows.append({
+            "symbol": symbol,
+            "days": days,
+            "start": window_candles[0]["time"],
+            "end": window_candles[-1]["time"],
+            "bars": len(window_candles),
+            "trades": result.total_trades,
+            "return_pct": round((result.final_balance - settings["initial_balance"]) / settings["initial_balance"] * 100.0, 3),
+            "profit_factor": result.profit_factor,
+            "max_drawdown": result.max_drawdown,
+        })
+
+    metrics = aggregate_results(results, settings)
+    metrics["window_days"] = days
+    metrics["window_start"] = start_ts.isoformat()
+    metrics["window_end"] = common_end.isoformat()
+    metrics["windows"] = windows
     return metrics
 
 
@@ -910,6 +1021,62 @@ def score_rolling_holdout(metrics: dict, settings: dict) -> dict:
     return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
 
 
+def score_recent_windows(metrics: dict | None, settings: dict) -> dict:
+    if not metrics:
+        return {
+            "passed": False,
+            "status": "failed",
+            "reasons": ["Recent window metrics were not produced."],
+        }
+    reasons = []
+    short = metrics.get("short") or {}
+    long = metrics.get("long") or {}
+    reasons.extend(_score_recent_window(
+        "Recent 14d",
+        short,
+        min_return_pct=float(settings["min_recent_short_return_pct"]),
+        min_trades=int(settings["min_recent_short_trades"]),
+        min_profit_factor=float(settings["min_recent_profit_factor"]),
+        max_drawdown_pct=float(settings["max_drawdown_pct"]),
+    ))
+    reasons.extend(_score_recent_window(
+        "Recent 30d",
+        long,
+        min_return_pct=float(settings["min_recent_long_return_pct"]),
+        min_trades=int(settings["min_recent_long_trades"]),
+        min_profit_factor=float(settings["min_recent_profit_factor"]),
+        max_drawdown_pct=float(settings["max_drawdown_pct"]),
+    ))
+    return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
+
+
+def _score_recent_window(
+    label: str,
+    metrics: dict,
+    *,
+    min_return_pct: float,
+    min_trades: int,
+    min_profit_factor: float,
+    max_drawdown_pct: float,
+) -> list[str]:
+    reasons = []
+    if int(metrics.get("total_trades") or 0) < min_trades:
+        reasons.append(f"{label} trades {int(metrics.get('total_trades') or 0)} below {min_trades}.")
+    if float(metrics.get("return_pct") or 0.0) < min_return_pct:
+        reasons.append(
+            f"{label} return {float(metrics.get('return_pct') or 0.0):.2f}% below {min_return_pct:.2f}%."
+        )
+    if float(metrics.get("max_drawdown") or 0.0) > max_drawdown_pct / 100.0:
+        reasons.append(
+            f"{label} drawdown {float(metrics.get('max_drawdown') or 0.0) * 100:.2f}% exceeds {max_drawdown_pct:.2f}%."
+        )
+    if float(metrics.get("profit_factor") or 0.0) < min_profit_factor:
+        reasons.append(
+            f"{label} PF {float(metrics.get('profit_factor') or 0.0):.2f} below {min_profit_factor:.2f}."
+        )
+    return reasons
+
+
 def score_confirmation(metrics: dict | None, settings: dict) -> dict:
     reasons = []
     if not metrics:
@@ -1010,6 +1177,7 @@ def _candidate_selection_score(
     holdout: dict | None,
     holdout_stress: dict | None,
     rolling_holdout: dict | None = None,
+    recent_windows: dict | None = None,
     confirmation: dict | None = None,
 ) -> float:
     weighted_score = train.get("score", 0.0) * 0.20 + validation.get("score", 0.0) * 0.35
@@ -1026,6 +1194,15 @@ def _candidate_selection_score(
     if rolling_holdout:
         weighted_score += rolling_holdout.get("score", 0.0) * 0.30
         weight += 0.30
+    if recent_windows:
+        recent_short = recent_windows.get("short") or {}
+        recent_long = recent_windows.get("long") or {}
+        recent_score = (
+            float(recent_short.get("score") or 0.0) * 0.40
+            + float(recent_long.get("score") or 0.0) * 0.60
+        )
+        weighted_score += recent_score * 0.35
+        weight += 0.35
     if confirmation:
         weighted_score += confirmation.get("score", 0.0) * 0.20
         weight += 0.20
@@ -1435,6 +1612,7 @@ def _ai_review(result: dict) -> dict | None:
             "holdout_metrics": result["best_candidate"].get("holdout_metrics"),
             "holdout_stress_metrics": result["best_candidate"].get("holdout_stress_metrics"),
             "rolling_holdout_metrics": result["best_candidate"].get("rolling_holdout_metrics"),
+            "recent_window_metrics": result["best_candidate"].get("recent_window_metrics"),
             "confirmation_metrics": result["best_candidate"].get("confirmation_metrics"),
             "gates": result["best_candidate"].get("gates", {}),
             "symbol_group": result["best_candidate"].get("symbol_group"),

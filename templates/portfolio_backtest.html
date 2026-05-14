@@ -42,6 +42,40 @@
   </section>
 
   <section class="card">
+    <h2>Portfolio Milestone</h2>
+    <div class="row">
+      <label>14d Target % <input type="number" id="target-short" min="0" max="50" step="0.1" value="2.5" /></label>
+      <label>30d Target % <input type="number" id="target-long" min="0" max="100" step="0.1" value="6" /></label>
+      <label>Max DD % <input type="number" id="target-dd" min="0.1" max="50" step="0.1" value="6" /></label>
+      <label>Include Candidates <input type="checkbox" id="include-candidates" /></label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="milestone-btn">Evaluate Active Milestone</button>
+        <button type="button" id="search-btn">Search Candidate Pool</button>
+      </div>
+    </div>
+    <div class="status-grid" id="milestone-grid" style="margin-top:12px">
+      <div class="status-item"><span class="status-label">Status</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">14d Return</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">30d Return</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">Worst DD</span><span class="status-value">--</span></div>
+    </div>
+    <p class="small" id="milestone-msg"></p>
+    <table class="table" id="candidate-search-table">
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>14d</th>
+          <th>30d</th>
+          <th>Worst DD</th>
+          <th>Strategies</th>
+          <th>Reasons</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="6" class="small">Search the candidate pool to compare possible portfolios.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
     <h2>Combined and Symbol P&L</h2>
     <div class="chart-wrap">
       <canvas id="portfolio-chart"></canvas>
@@ -238,6 +272,116 @@
     });
   }
 
+  function baseMilestoneBody() {
+    const endValue = document.getElementById('end-date').value;
+    const body = {
+      short_days: 14,
+      long_days: 30,
+      min_short_return_pct: parseFloat(document.getElementById('target-short').value) || 2.5,
+      min_long_return_pct: parseFloat(document.getElementById('target-long').value) || 6,
+      max_drawdown_pct: parseFloat(document.getElementById('target-dd').value) || 6,
+      initial_balance: parseFloat(document.getElementById('initial-balance').value) || 100000,
+      realistic: document.getElementById('realistic').checked,
+      slippage_pips: parseFloat(document.getElementById('slippage').value) || 0,
+      min_sl_pips: parseFloat(document.getElementById('min-sl').value) || 0,
+    };
+    if (endValue) body.end_date = new Date(endValue).toISOString();
+    return body;
+  }
+
+  function renderMilestone(data) {
+    const status = data.status || {};
+    const short = data.short?.portfolio || {};
+    const long = data.long?.portfolio || {};
+    const worstDd = Math.max(Number(short.max_drawdown_pct || 0), Number(long.max_drawdown_pct || 0));
+    const statusColor = status.passed ? '#35d48b' : '#ff6475';
+    document.getElementById('milestone-grid').innerHTML = `
+      <div class="status-item"><span class="status-label">Status</span><span class="status-value" style="color:${statusColor}">${status.status || '--'}</span></div>
+      <div class="status-item"><span class="status-label">14d Return</span><span class="status-value">${fmtPct(short.return_pct, true)}</span></div>
+      <div class="status-item"><span class="status-label">30d Return</span><span class="status-value">${fmtPct(long.return_pct, true)}</span></div>
+      <div class="status-item"><span class="status-label">Worst DD</span><span class="status-value">${fmtPct(-worstDd, true)}</span></div>
+    `;
+    document.getElementById('milestone-msg').textContent = status.reasons?.length
+      ? status.reasons.join(' ')
+      : 'Milestone passed for the active portfolio.';
+  }
+
+  function renderCandidateSearch(data) {
+    const tbody = document.querySelector('#candidate-search-table tbody');
+    tbody.innerHTML = '';
+    const portfolios = data.top_portfolios || [];
+    if (!portfolios.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="small">No candidate portfolios were available.</td></tr>';
+      return;
+    }
+    portfolios.forEach(p => {
+      const worstDd = Math.max(Number(p.short?.max_drawdown_pct || 0), Number(p.long?.max_drawdown_pct || 0));
+      const strategies = (p.strategies || []).map(s => `#${s.ruleset_id} ${s.symbol} ${s.long_return_pct}%`).join('<br>');
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td style="color:${p.status?.passed ? '#35d48b' : '#ff6475'};font-weight:700">${p.status?.status || '--'}</td>
+        <td>${fmtPct(p.short?.return_pct, true)}<br><span class="small">${p.short?.total_trades || 0} trades</span></td>
+        <td>${fmtPct(p.long?.return_pct, true)}<br><span class="small">${p.long?.total_trades || 0} trades</span></td>
+        <td>${fmtPct(-worstDd, true)}</td>
+        <td class="small">${strategies || '--'}</td>
+        <td class="small">${(p.status?.reasons || []).slice(0, 4).join(' ') || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function runMilestone() {
+    const btn = document.getElementById('milestone-btn');
+    const msg = document.getElementById('milestone-msg');
+    btn.disabled = true;
+    msg.textContent = 'Evaluating active portfolio milestone...';
+    try {
+      const resp = await fetch('/api/rulesets/portfolio/milestone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(baseMilestoneBody()),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+      renderMilestone(data);
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function searchCandidates() {
+    const btn = document.getElementById('search-btn');
+    const msg = document.getElementById('milestone-msg');
+    btn.disabled = true;
+    msg.textContent = 'Searching candidate portfolios...';
+    try {
+      const body = {
+        ...baseMilestoneBody(),
+        include_candidates: document.getElementById('include-candidates').checked,
+        top_per_group: 8,
+        beam_width: 200,
+        top_portfolios: 10,
+      };
+      const resp = await fetch('/api/rulesets/portfolio/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+      renderCandidateSearch(data);
+      msg.textContent = data.best_passing
+        ? `Found a passing candidate portfolio from ${data.candidate_count} strategy candidates.`
+        : `No passing portfolio found across ${data.candidate_count} strategy candidates.`;
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   async function runBacktest() {
     const btn = document.getElementById('run-btn');
     const msg = document.getElementById('status-msg');
@@ -275,6 +419,9 @@
   }
 
   document.getElementById('run-btn').addEventListener('click', runBacktest);
+  document.getElementById('milestone-btn').addEventListener('click', runMilestone);
+  document.getElementById('search-btn').addEventListener('click', searchCandidates);
   runBacktest();
+  runMilestone();
 </script>
 {% endblock %}

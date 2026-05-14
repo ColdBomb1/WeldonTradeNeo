@@ -13,7 +13,7 @@ from db import get_session
 from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun
-from services import ai_service, market_context_service, rule_engine
+from services import ai_service, market_context_service, portfolio_milestone, rule_engine
 from services.backtest_engine import BacktestConfig, run_backtest
 from services.strategy_service import list_strategies
 
@@ -66,6 +66,13 @@ def _structured_promotion_blocker(rs: RuleSet) -> str | None:
         return "Structured research rulesets require rolling-holdout metrics before promotion."
     if float(rolling_metrics.get("rolling_window_pass_ratio") or 0.0) < 0.67:
         return "Structured research ruleset rolling-holdout pass ratio is below the promotion minimum."
+    if criteria.get("recent_window_enabled"):
+        recent_gate = gates.get("recent_windows") or {}
+        if recent_gate.get("passed") is not True or recent_gate.get("status") != "passed":
+            return "Structured research rulesets require passed recent 14-day and 30-day milestone windows before promotion."
+        recent_metrics = metrics.get("recent_windows") or {}
+        if not recent_metrics.get("short") or not recent_metrics.get("long"):
+            return "Structured research ruleset recent milestone metrics are missing."
     confirmation_required = criteria.get("confirmation_enabled", True)
     if confirmation_required:
         confirmation_gate = gates.get("confirmation") or {}
@@ -632,6 +639,32 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
             "strategy_curves": strategy_curves,
             "trades": all_trades[-200:],
         })
+    finally:
+        session.close()
+
+
+@router.post("/api/rulesets/portfolio/milestone")
+async def evaluate_portfolio_milestone(request: Request) -> JSONResponse:
+    payload = await request.json()
+    cfg = load_config()
+    session = get_session()
+    try:
+        result = portfolio_milestone.evaluate_active_milestone(session, payload, cfg)
+        status_code = 400 if result.get("error") else 200
+        return JSONResponse(result, status_code=status_code)
+    finally:
+        session.close()
+
+
+@router.post("/api/rulesets/portfolio/search")
+async def search_portfolio_candidates(request: Request) -> JSONResponse:
+    payload = await request.json()
+    cfg = load_config()
+    session = get_session()
+    try:
+        result = portfolio_milestone.search_candidate_portfolios(session, payload, cfg)
+        status_code = 400 if result.get("error") else 200
+        return JSONResponse(result, status_code=status_code)
     finally:
         session.close()
 
