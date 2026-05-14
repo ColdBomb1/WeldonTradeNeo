@@ -10,7 +10,7 @@
 {% block content %}
 <header>
   <h1>Rule-Based Strategies</h1>
-  <p>Define trading rules in natural language. The configured AI provider interprets the rules against market data to generate signals, then evolves the rules through training.</p>
+  <p>Define trading rules in natural language. Training creates candidate rulesets; candidates require a validation backtest before promotion to active trading.</p>
 </header>
 <main>
   <section class="card">
@@ -111,8 +111,10 @@
       </label>
       <div class="button-wrap" style="align-self:flex-end">
         <button type="button" id="backtest-btn">Run Backtest</button>
+        <button type="button" id="validate-btn">Run Validation</button>
       </div>
     </div>
+    <div id="validation-display" class="small" style="margin-top:8px"></div>
     <div id="bt-progress" style="margin-top:10px;display:none">
       <div class="status-grid">
         <div class="status-item"><span class="status-label">Progress</span><span class="status-value" id="bp-pct">--</span></div>
@@ -189,6 +191,7 @@
 <script>
   let currentRsId = null;
   let activeBtId = null, activeRunId = null;
+  let activeBtPurpose = 'backtest';
   let btPollTimer = null, trPollTimer = null;
   let btEquityChart = null, trConvergenceChart = null, trEquityChart = null;
 
@@ -201,7 +204,13 @@
   document.querySelectorAll('[id$="-end"]').forEach(el => el.value = dateStr(today));
 
   function statusBadge(status) {
-    const colors = { active: '#27ae60', inactive: '#888', training: '#e67e22' };
+    const colors = {
+      active: '#27ae60',
+      inactive: '#888',
+      training: '#e67e22',
+      candidate: '#2980b9',
+      validated: '#16a085',
+    };
     return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#888'};color:#fff;font-size:12px">${status}</span>`;
   }
 
@@ -209,6 +218,25 @@
     if (v == null) return '--';
     const c = v >= 0 ? '#27ae60' : '#e74c3c';
     return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
+  }
+
+  function renderValidation(rs) {
+    const el = document.getElementById('validation-display');
+    if (!el) return;
+    const params = rs.parameters || {};
+    const pm = rs.performance_metrics || {};
+    const validation = params.validation || pm.validation;
+    if (!validation || validation.status === 'not_run') {
+      el.innerHTML = '<em>No validation run recorded for this ruleset.</em>';
+      return;
+    }
+    const passed = validation.passed === true || validation.status === 'passed';
+    const color = passed ? '#27ae60' : (validation.status === 'stale' ? '#e67e22' : '#e74c3c');
+    const reasons = validation.reasons && validation.reasons.length
+      ? ` ${validation.reasons.join(' ')}`
+      : '';
+    const when = validation.validated_at ? ` on ${new Date(validation.validated_at).toLocaleString()}` : '';
+    el.innerHTML = `<strong style="color:${color}">Validation ${validation.status}${when}.</strong>${reasons}`;
   }
 
   // ---- Ruleset list ----
@@ -229,6 +257,10 @@
       let actions = '';
       if (rs.status === 'active') {
         actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'deactivate')">Deactivate</button>`;
+      } else if (rs.status === 'validated') {
+        actions = `<button onclick="event.stopPropagation();promoteRs(${rs.id})">Promote</button>`;
+      } else if (rs.status === 'candidate') {
+        actions = `<button onclick="event.stopPropagation();validateRs(${rs.id})">Validate</button>`;
       } else {
         actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'activate')">Activate</button>`;
       }
@@ -265,6 +297,7 @@
     const rsTf = rs.timeframes || [];
     [...tfEl.options].forEach(o => { o.selected = rsTf.includes(o.value); });
     document.getElementById('detail-rules').value = rs.rules_text;
+    renderValidation(rs);
     const pm = rs.performance_metrics || {};
     const perfEl = document.getElementById('perf-display');
     if (pm.total_trades != null) {
@@ -283,8 +316,22 @@
   }
 
   async function toggleStatus(id, action) {
-    await fetch(`/api/rulesets/${id}/${action}`, { method: 'POST' });
+    const resp = await fetch(`/api/rulesets/${id}/${action}`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
     loadRulesets();
+  }
+  async function promoteRs(id) {
+    if (!confirm('Promote this validated candidate to active? Other active rulesets will be deactivated.')) return;
+    const resp = await fetch(`/api/rulesets/${id}/promote`, { method: 'POST' });
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    loadRulesets();
+    showDetail(id);
+  }
+  async function validateRs(id) {
+    await showDetail(id);
+    runBacktest('validation');
   }
   async function duplicateRs(id) {
     await fetch(`/api/rulesets/${id}/duplicate`, { method: 'POST' });
@@ -383,19 +430,44 @@
 
       if (p.equity_curve && p.equity_curve.length > 1) updateBtChart(p.equity_curve);
 
+      if (p.status === 'failed' || p.status === 'stopped') {
+        clearInterval(btPollTimer); btPollTimer = null;
+        document.getElementById('bt-stop-btn').style.display = 'none';
+        document.getElementById('backtest-btn').disabled = false;
+        document.getElementById('validate-btn').disabled = false;
+        document.getElementById('backtest-btn').textContent = 'Run Backtest';
+        document.getElementById('validate-btn').textContent = 'Run Validation';
+        document.getElementById('bt-results').innerHTML =
+          `<span style="color:#e74c3c">Backtest ${p.status}${p.error ? ': ' + p.error : ''}</span>`;
+        loadRulesets();
+        return;
+      }
+
       if (p.status === 'completed') {
         clearInterval(btPollTimer); btPollTimer = null;
         document.getElementById('bt-stop-btn').style.display = 'none';
         document.getElementById('backtest-btn').disabled = false;
+        document.getElementById('validate-btn').disabled = false;
         document.getElementById('backtest-btn').textContent = 'Run Backtest';
+        document.getElementById('validate-btn').textContent = 'Run Validation';
         if (p.results) {
           const r = p.results;
-          document.getElementById('bt-results').innerHTML = `
-            <strong>Final:</strong> ${r.total_trades} trades |
+          const base = `
+            ${r.total_trades} trades |
             WR: ${(r.win_rate*100).toFixed(1)}% | Sharpe: ${r.sharpe_ratio?.toFixed(2)} |
             PF: ${r.profit_factor?.toFixed(2)} | DD: ${(r.max_drawdown*100).toFixed(1)}% |
             Balance: $${r.final_balance?.toFixed(2)}
           `;
+          if (r.validation_status) {
+            const ok = r.validation_status === 'passed';
+            const reasons = r.validation_reasons && r.validation_reasons.length
+              ? `<br>${r.validation_reasons.join(' ')}`
+              : '';
+            document.getElementById('bt-results').innerHTML =
+              `<strong style="color:${ok ? '#27ae60' : '#e74c3c'}">Validation ${r.validation_status}:</strong> ${base}${reasons}`;
+          } else {
+            document.getElementById('bt-results').innerHTML = `<strong>Final:</strong> ${base}`;
+          }
         }
         showDetail(currentRsId);
         loadRulesets();
@@ -403,10 +475,15 @@
     } catch (e) { console.error('Backtest poll error:', e); }
   }
 
-  document.getElementById('backtest-btn').addEventListener('click', async () => {
+  async function runBacktest(purpose = 'backtest') {
     if (!currentRsId) return;
-    const btn = document.getElementById('backtest-btn');
-    btn.disabled = true; btn.textContent = 'Starting...';
+    activeBtPurpose = purpose;
+    const btn = document.getElementById(purpose === 'validation' ? 'validate-btn' : 'backtest-btn');
+    const backtestBtn = document.getElementById('backtest-btn');
+    const validateBtn = document.getElementById('validate-btn');
+    backtestBtn.disabled = true;
+    validateBtn.disabled = true;
+    btn.textContent = 'Starting...';
     document.getElementById('bt-results').innerHTML = '';
 
     const symbolsEl = document.getElementById('bt-symbols');
@@ -421,21 +498,28 @@
         start_date: document.getElementById('bt-start').value + 'T00:00:00+00:00',
         end_date: document.getElementById('bt-end').value + 'T23:59:59+00:00',
         mode: document.getElementById('bt-mode').value,
+        purpose,
       }),
     });
     const data = await resp.json();
     if (data.error) {
-      btn.disabled = false; btn.textContent = 'Run Backtest';
+      backtestBtn.disabled = false;
+      validateBtn.disabled = false;
+      backtestBtn.textContent = 'Run Backtest';
+      validateBtn.textContent = 'Run Validation';
       document.getElementById('bt-results').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
       return;
     }
     activeBtId = data.bt_id;
-    btn.textContent = 'Running...';
+    btn.textContent = purpose === 'validation' ? 'Validating...' : 'Running...';
     document.getElementById('bt-progress').style.display = '';
     document.getElementById('bt-stop-btn').style.display = '';
     if (btPollTimer) clearInterval(btPollTimer);
     btPollTimer = setInterval(pollBacktest, 2000);
-  });
+  }
+
+  document.getElementById('backtest-btn').addEventListener('click', () => runBacktest('backtest'));
+  document.getElementById('validate-btn').addEventListener('click', () => runBacktest('validation'));
 
   document.getElementById('bt-stop-btn').addEventListener('click', async () => {
     if (activeBtId) await fetch(`/api/rulesets/backtest/${activeBtId}/stop`, { method: 'POST' });
@@ -564,10 +648,14 @@
         document.getElementById('train-btn').disabled = false;
         document.getElementById('train-btn').textContent = 'Start Training';
         if (p.status === 'completed') {
-          document.getElementById('train-status').innerHTML =
-            `<span style="color:#27ae60">Training complete! Rules updated to best iteration. <a href="#" onclick="showDetail(${currentRsId});return false">Refresh</a> to see new rules.</span>`;
+          const candidateId = p.candidate_ruleset_id;
+          document.getElementById('train-status').innerHTML = candidateId
+            ? `<span style="color:#27ae60">Training complete. Candidate ruleset #${candidateId} created. <a href="#" onclick="showDetail(${candidateId});return false">Open candidate</a> and run validation before promotion.</span>`
+            : `<span style="color:#27ae60">Training complete. No candidate was created.</span>`;
+          if (candidateId) showDetail(candidateId);
+        } else {
+          document.getElementById('train-status').innerHTML = '<span style="color:#e67e22">Training stopped. No candidate was promoted.</span>';
         }
-        showDetail(currentRsId);
         loadRulesets();
       }
     } catch (e) { console.error('Training poll error:', e); }

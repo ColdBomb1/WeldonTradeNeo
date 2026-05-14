@@ -1740,6 +1740,7 @@ def train_ruleset(
     start_balance = initial_balance or tc.initial_balance
     dd_target = target_dd_pct or 5.0    # default 5%
     profit_target = target_profit_pct or 10.0  # default 10%
+    source_ruleset_name = f"Ruleset {ruleset_id}"
     session = get_session()
 
     try:
@@ -1747,6 +1748,7 @@ def train_ruleset(
         if not ruleset:
             return []
         current_rules = ruleset.rules_text
+        source_ruleset_name = ruleset.name
     finally:
         session.close()
 
@@ -1975,8 +1977,10 @@ def train_ruleset(
         else:
             logger.info("  No rule changes suggested — continuing with current rules")
 
-    # Save best rules — prioritize drawdown compliance, then highest profit
-    if iterations:
+    # Write the best pass as a validation-gated child ruleset instead of
+    # mutating the source ruleset.
+    candidate_id = None
+    if iterations and not _is_stopped(training_run_id):
         dd_limit = dd_target / 100
         within_dd = [it for it in iterations if (it.get("max_drawdown") or 1) <= dd_limit]
         if within_dd:
@@ -1988,21 +1992,79 @@ def train_ruleset(
         try:
             ruleset = session.query(RuleSet).filter(RuleSet.id == ruleset_id).first()
             if ruleset:
-                ruleset.rules_text = best["rules"]
-                ruleset.version += 1
-                ruleset.performance_metrics = {
+                now = datetime.now(timezone.utc)
+                base_params = dict(ruleset.parameters or {})
+                base_params.pop("validation", None)
+                base_params.pop("promotion", None)
+                candidate_params = {
+                    **base_params,
+                    "candidate": True,
+                    "source_ruleset_id": ruleset_id,
+                    "source_ruleset_name": ruleset.name,
+                    "training_run_id": training_run_id,
+                    "selected_iteration": best.get("iteration_number"),
+                    "training": {
+                        "symbols": symbols,
+                        "timeframe": timeframe,
+                        "initial_balance": start_balance,
+                        "target_dd_pct": dd_target,
+                        "target_profit_pct": profit_target,
+                        "max_iterations": tc.max_iterations,
+                    },
+                    "validation": {"status": "not_run", "passed": False},
+                }
+                training_metrics = {
                     k: best.get(k) for k in ("final_balance", "total_trades", "win_rate",
                                                "max_drawdown", "profit_factor", "sharpe_ratio")
                 }
-                ruleset.updated_at = datetime.now(timezone.utc)
-            session.commit()
+                candidate = RuleSet(
+                    name=f"{ruleset.name} candidate run {training_run_id}"[:128],
+                    description=(
+                        f"Candidate evolved from ruleset {ruleset.id} by training run "
+                        f"{training_run_id}. Requires validation before promotion."
+                    )[:512],
+                    status="candidate",
+                    rules_text=best.get("rules", ""),
+                    parameters=candidate_params,
+                    symbols=symbols,
+                    timeframes=[timeframe],
+                    version=1,
+                    parent_id=ruleset_id,
+                    performance_metrics={
+                        **training_metrics,
+                        "selection_basis": "training_in_sample",
+                        "validated": False,
+                        "validation_status": "not_run",
+                        "source_training_run_id": training_run_id,
+                    },
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(candidate)
+                session.commit()
+                candidate_id = candidate.id
+                logger.info(
+                    "Created candidate ruleset %d from source ruleset %d training run %d",
+                    candidate_id, ruleset_id, training_run_id,
+                )
+            else:
+                session.commit()
         except Exception:
+            logger.exception(
+                "Failed to create candidate ruleset from source ruleset %d training run %d",
+                ruleset_id, training_run_id,
+            )
             session.rollback()
         finally:
             session.close()
 
     # Mark training complete or stopped
     if training_run_id in _training_progress:
+        if candidate_id:
+            _training_progress[training_run_id]["candidate_ruleset_id"] = candidate_id
+            _training_progress[training_run_id]["candidate_ruleset_name"] = (
+                f"{source_ruleset_name} candidate run {training_run_id}"[:128]
+            )
         if _is_stopped(training_run_id):
             _training_progress[training_run_id]["status"] = "stopped"
         else:
