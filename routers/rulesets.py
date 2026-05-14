@@ -55,6 +55,7 @@ def _structured_promotion_blocker(rs: RuleSet) -> str | None:
     if params.get("execution_engine") != "research_genome":
         return None
     validation = params.get("validation") or {}
+    criteria = validation.get("criteria") or {}
     gates = validation.get("gates") or {}
     rolling_gate = gates.get("rolling_holdout") or {}
     if rolling_gate.get("passed") is not True or rolling_gate.get("status") != "passed":
@@ -65,6 +66,20 @@ def _structured_promotion_blocker(rs: RuleSet) -> str | None:
         return "Structured research rulesets require rolling-holdout metrics before promotion."
     if float(rolling_metrics.get("rolling_window_pass_ratio") or 0.0) < 0.67:
         return "Structured research ruleset rolling-holdout pass ratio is below the promotion minimum."
+    confirmation_required = criteria.get("confirmation_enabled", True)
+    if confirmation_required:
+        confirmation_gate = gates.get("confirmation") or {}
+        if confirmation_gate.get("passed") is not True or confirmation_gate.get("status") != "passed":
+            return "Structured research rulesets require a passed confirmation-robustness gate before promotion."
+        confirmation_metrics = metrics.get("confirmation") or {}
+        expected_variants = int(criteria.get("confirmation_variants") or 1)
+        actual_variants = int(confirmation_metrics.get("neighbor_count") or 0)
+        if actual_variants < expected_variants:
+            return "Structured research ruleset confirmation did not test enough parameter neighbors."
+        min_pass_ratio = float(criteria.get("min_confirmation_pass_ratio") or 0.67)
+        pass_ratio = float(confirmation_metrics.get("neighbor_pass_ratio") or 0.0)
+        if pass_ratio < min_pass_ratio:
+            return "Structured research ruleset confirmation neighbor pass ratio is below the promotion minimum."
     return None
 
 

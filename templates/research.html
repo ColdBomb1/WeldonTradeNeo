@@ -6,7 +6,7 @@
 {% block content %}
 <header>
   <h1>Strategy Research</h1>
-  <p>Run structured evolution over deterministic strategy genomes with train, validation, untouched holdout, and cost-stress gates.</p>
+  <p>Run structured evolution over deterministic strategy genomes with train, validation, untouched holdout, rolling, stress, and confirmation gates.</p>
 </header>
 <main>
   <section class="card">
@@ -54,6 +54,8 @@
       <label>Min Holdout Trades <input type="number" id="min-holdout-trades" min="1" max="500" value="{{ defaults.min_holdout_trades }}" /></label>
       <label>Rolling Windows <input type="number" id="rolling-windows" min="1" max="12" value="{{ defaults.rolling_holdout_windows }}" /></label>
       <label>Min Rolling Pass <input type="number" id="rolling-pass" min="0" max="1" step="0.05" value="{{ defaults.min_rolling_holdout_pass_ratio }}" /></label>
+      <label>Confirm Variants <input type="number" id="confirm-variants" min="1" max="24" value="{{ defaults.confirmation_variants }}" /></label>
+      <label>Min Confirm Pass <input type="number" id="confirm-pass" min="0" max="1" step="0.05" value="{{ defaults.min_confirmation_pass_ratio }}" /></label>
       <label>Min Session Hours <input type="number" id="min-session-hours" min="1" max="23" value="{{ defaults.min_session_hours }}" /></label>
       <label>Cost Stress x <input type="number" id="cost-stress" min="1" max="5" step="0.1" value="{{ defaults.cost_stress_multiplier }}" /></label>
       <label>AI Review <input type="checkbox" id="ai-review-enabled" {% if defaults.ai_review %}checked{% endif %} /></label>
@@ -100,6 +102,7 @@
           <th>Validation</th>
           <th>Holdout</th>
           <th>Rolling</th>
+          <th>Confirm</th>
           <th>Stress</th>
           <th>Ruleset</th>
           <th>Reasons</th>
@@ -150,6 +153,13 @@
     return `${fmtMetric(m)}${ratio}`;
   }
 
+  function fmtConfirmMetric(m) {
+    if (!m || m.neighbor_count == null) return '--';
+    const exact = m.exact || {};
+    const ratio = m.neighbor_pass_ratio != null ? `${(m.neighbor_pass_ratio * 100).toFixed(0)}%` : '--';
+    return `${fmtMetric(exact)}<br><span class="small">neighbors ${m.neighbor_passes || 0}/${m.neighbor_count} ${ratio}</span>`;
+  }
+
   function compactReasons(reasons) {
     if (!reasons || !reasons.length) return '--';
     return reasons.slice(0, 3).join(' ');
@@ -196,6 +206,7 @@
     const vm = best.validation_metrics || {};
     const hm = best.holdout_metrics || {};
     const rhm = best.rolling_holdout_metrics || {};
+    const cm = best.confirmation_metrics || {};
     const hsm = best.holdout_stress_metrics || best.validation_stress_metrics || {};
     const bestGroup = best.symbol_group || 'global';
     document.getElementById('detail').style.display = '';
@@ -208,6 +219,7 @@
       <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${fmtMetric(vm)}</span></div>
       <div class="status-item"><span class="status-label">Holdout</span><span class="status-value">${fmtMetric(hm)}</span></div>
       <div class="status-item"><span class="status-label">Rolling</span><span class="status-value">${fmtRollingMetric(rhm)}</span></div>
+      <div class="status-item"><span class="status-label">Confirm</span><span class="status-value">${fmtConfirmMetric(cm)}</span></div>
       <div class="status-item"><span class="status-label">Stress</span><span class="status-value">${fmtMetric(hsm)}</span></div>
       <div class="status-item"><span class="status-label">Ruleset</span><span class="status-value">${run.candidate_ruleset_id ? '#'+run.candidate_ruleset_id : '--'}</span></div>
     `;
@@ -219,6 +231,7 @@
       const m = c.validation_metrics || {};
       const hm = c.holdout_metrics || {};
       const rhm = c.rolling_holdout_metrics || {};
+      const cm = c.confirmation_metrics || {};
       const sm = c.holdout_stress_metrics || c.validation_stress_metrics || {};
       const row = document.createElement('tr');
       row.innerHTML = `
@@ -230,6 +243,7 @@
         <td>${fmtMetric(m)}</td>
         <td>${fmtMetric(hm)}</td>
         <td>${fmtRollingMetric(rhm)}</td>
+        <td>${fmtConfirmMetric(cm)}</td>
         <td>${fmtMetric(sm)}</td>
         <td>${c.ruleset_id ? `<a href="/rulesets" onclick="event.stopPropagation()">#${c.ruleset_id}</a>` : '--'}</td>
         <td class="small">${compactReasons(c.reasons)}</td>
@@ -293,6 +307,9 @@
         rolling_holdout_days: parseInt(document.getElementById('holdout-days').value) || 14,
         rolling_holdout_step_days: parseInt(document.getElementById('holdout-days').value) || 14,
         min_rolling_holdout_pass_ratio: parseFloat(document.getElementById('rolling-pass').value) || 0.67,
+        confirmation_enabled: true,
+        confirmation_variants: parseInt(document.getElementById('confirm-variants').value) || 6,
+        min_confirmation_pass_ratio: parseFloat(document.getElementById('confirm-pass').value) || 0.67,
         min_session_hours: parseInt(document.getElementById('min-session-hours').value) || 4,
         cost_stress_multiplier: parseFloat(document.getElementById('cost-stress').value) || 1.5,
         risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,

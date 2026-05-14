@@ -60,6 +60,11 @@ DEFAULT_SETTINGS = {
     "rolling_holdout_days": 14,
     "rolling_holdout_step_days": 14,
     "min_rolling_holdout_pass_ratio": 0.67,
+    "confirmation_enabled": True,
+    "confirmation_variants": 6,
+    "confirmation_mutation_rate": 0.08,
+    "confirmation_stress_multiplier": 1.25,
+    "min_confirmation_pass_ratio": 0.67,
     "cost_stress_multiplier": 1.5,
     "min_stress_profit_factor": 1.05,
     "min_stress_return_pct": 0.0,
@@ -162,6 +167,14 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["min_rolling_holdout_pass_ratio"] = max(
         0.0,
         min(1.0, float(settings["min_rolling_holdout_pass_ratio"])),
+    )
+    settings["confirmation_enabled"] = _coerce_bool(settings["confirmation_enabled"])
+    settings["confirmation_variants"] = max(1, min(24, int(settings["confirmation_variants"])))
+    settings["confirmation_mutation_rate"] = max(0.01, min(0.35, float(settings["confirmation_mutation_rate"])))
+    settings["confirmation_stress_multiplier"] = max(1.0, min(5.0, float(settings["confirmation_stress_multiplier"])))
+    settings["min_confirmation_pass_ratio"] = max(
+        0.0,
+        min(1.0, float(settings["min_confirmation_pass_ratio"])),
     )
     settings["cost_stress_multiplier"] = max(1.0, min(5.0, float(settings["cost_stress_multiplier"])))
     settings["min_stress_profit_factor"] = max(0.1, min(10.0, float(settings["min_stress_profit_factor"])))
@@ -444,6 +457,14 @@ def _evaluate_candidate(
         "holdout_stress": holdout_stress_gate,
         "rolling_holdout": rolling_holdout_gate,
     }
+    confirmation = None
+    if settings["confirmation_enabled"]:
+        base_reasons = _collect_gate_reasons(gates)
+        if not base_reasons:
+            confirmation = evaluate_confirmation(genome, group_candles, timeframe, settings)
+            gates["confirmation"] = score_confirmation(confirmation, settings)
+        else:
+            gates["confirmation"] = {"passed": False, "status": "skipped", "reasons": []}
     reasons = _collect_gate_reasons(gates)
     return {
         "rank": 0,
@@ -460,6 +481,7 @@ def _evaluate_candidate(
         "holdout_metrics": holdout,
         "holdout_stress_metrics": holdout_stress,
         "rolling_holdout_metrics": rolling_holdout,
+        "confirmation_metrics": confirmation,
         "gates": gates,
         "score": _candidate_selection_score(
             train=item["train_metrics"],
@@ -468,6 +490,7 @@ def _evaluate_candidate(
             holdout=holdout,
             holdout_stress=holdout_stress,
             rolling_holdout=rolling_holdout,
+            confirmation=confirmation,
         ),
         "passed": not reasons,
         "reasons": reasons,
@@ -515,6 +538,7 @@ def evaluate_rolling_holdout(
     candles_by_symbol: dict[str, list[dict]],
     timeframe: str,
     settings: dict,
+    spread_multiplier: float = 1.0,
 ) -> dict:
     results: list[tuple[str, BacktestResults]] = []
     window_summaries: list[dict] = []
@@ -531,7 +555,7 @@ def evaluate_rolling_holdout(
                 start_date=_parse_dt(window_candles[0]["time"]),
                 end_date=_parse_dt(window_candles[-1]["time"]),
                 initial_balance=settings["initial_balance"],
-                spread_pips=float(settings["spread_pips"]),
+                spread_pips=float(settings["spread_pips"]) * spread_multiplier,
                 pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
                 lot_type=settings["lot_type"],
                 risk_per_trade_pct=settings["risk_per_trade_pct"],
@@ -566,6 +590,71 @@ def evaluate_rolling_holdout(
     metrics["rolling_window_pass_ratio"] = round(passes / count, 3) if count else 0.0
     metrics["rolling_windows"] = window_summaries
     return metrics
+
+
+def evaluate_confirmation(
+    genome: dict,
+    candles_by_symbol: dict[str, list[dict]],
+    timeframe: str,
+    settings: dict,
+) -> dict:
+    seed = f"{settings.get('seed')}:confirmation:{_genome_key(genome)}"
+    rng = random.Random(seed)
+    exact = evaluate_rolling_holdout(genome, candles_by_symbol, timeframe, settings)
+    exact_gate = score_rolling_holdout(exact, settings)
+
+    stress_multiplier = float(settings.get("confirmation_stress_multiplier") or 1.0)
+    exact_stress = None
+    exact_stress_gate = None
+    if stress_multiplier > 1.0:
+        stress_settings = _confirmation_stress_settings(settings)
+        exact_stress = evaluate_rolling_holdout(
+            genome,
+            candles_by_symbol,
+            timeframe,
+            settings,
+            spread_multiplier=stress_multiplier,
+        )
+        exact_stress_gate = score_rolling_holdout(exact_stress, stress_settings)
+
+    variants = []
+    for idx in range(int(settings["confirmation_variants"])):
+        neighbor = _neighbor_genome(genome, rng, settings)
+        metrics = evaluate_rolling_holdout(neighbor, candles_by_symbol, timeframe, settings)
+        gate = score_rolling_holdout(metrics, settings)
+        variants.append({
+            "index": idx + 1,
+            "passed": gate["passed"],
+            "gate": gate,
+            "metrics": metrics,
+            "delta": _genome_delta(genome, neighbor),
+        })
+
+    neighbor_count = len(variants)
+    neighbor_passes = sum(1 for item in variants if item["passed"])
+    neighbor_metrics = [item["metrics"] for item in variants]
+    neighbor_scores = [float(m.get("score") or 0.0) for m in neighbor_metrics]
+    returns = [float(m.get("return_pct") or 0.0) for m in neighbor_metrics]
+    profit_factors = [float(m.get("profit_factor") or 0.0) for m in neighbor_metrics]
+    drawdowns = [float(m.get("max_drawdown") or 0.0) for m in neighbor_metrics]
+    score_parts = [float(exact.get("score") or 0.0)] + neighbor_scores
+
+    return {
+        "exact": exact,
+        "exact_gate": exact_gate,
+        "exact_stress": exact_stress,
+        "exact_stress_gate": exact_stress_gate,
+        "stress_multiplier": stress_multiplier,
+        "neighbor_count": neighbor_count,
+        "neighbor_passes": neighbor_passes,
+        "neighbor_pass_ratio": round(neighbor_passes / neighbor_count, 3) if neighbor_count else 0.0,
+        "avg_neighbor_return_pct": round(sum(returns) / len(returns), 3) if returns else 0.0,
+        "worst_neighbor_return_pct": round(min(returns), 3) if returns else 0.0,
+        "worst_neighbor_profit_factor": round(min(profit_factors), 3) if profit_factors else 0.0,
+        "max_neighbor_drawdown": round(max(drawdowns), 4) if drawdowns else 0.0,
+        "score": round(sum(score_parts) / len(score_parts), 4) if score_parts else 0.0,
+        "variants": variants,
+    }
 
 
 def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict) -> dict:
@@ -721,6 +810,41 @@ def score_rolling_holdout(metrics: dict, settings: dict) -> dict:
     return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
 
 
+def score_confirmation(metrics: dict | None, settings: dict) -> dict:
+    reasons = []
+    if not metrics:
+        return {
+            "passed": False,
+            "status": "failed",
+            "reasons": ["Confirmation metrics were not produced."],
+        }
+
+    exact_gate = metrics.get("exact_gate") or {}
+    if exact_gate.get("passed") is not True:
+        reasons.extend(f"Confirmation exact: {reason}" for reason in exact_gate.get("reasons") or [])
+
+    stress_gate = metrics.get("exact_stress_gate") or {}
+    if stress_gate and stress_gate.get("passed") is not True:
+        reasons.extend(f"Confirmation stress: {reason}" for reason in stress_gate.get("reasons") or [])
+
+    expected_neighbors = int(settings["confirmation_variants"])
+    neighbor_count = int(metrics.get("neighbor_count") or 0)
+    neighbor_pass_ratio = float(metrics.get("neighbor_pass_ratio") or 0.0)
+    min_pass_ratio = float(settings["min_confirmation_pass_ratio"])
+    if neighbor_count < expected_neighbors:
+        reasons.append(f"Confirmation variants {neighbor_count} below {expected_neighbors}.")
+    if neighbor_pass_ratio < min_pass_ratio:
+        reasons.append(
+            f"Confirmation neighbor pass ratio {neighbor_pass_ratio:.3f} below {min_pass_ratio:.3f}."
+        )
+    if float(metrics.get("worst_neighbor_return_pct") or 0.0) < -float(settings["max_symbol_loss_pct"]):
+        reasons.append(
+            f"Confirmation worst neighbor {metrics['worst_neighbor_return_pct']:.2f}% breaches "
+            f"-{settings['max_symbol_loss_pct']:.2f}%."
+        )
+    return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
+
+
 def score_cost_stress(metrics: dict, settings: dict, label: str) -> dict:
     reasons = []
     if metrics["max_drawdown"] > float(settings["max_drawdown_pct"]) / 100.0:
@@ -786,6 +910,7 @@ def _candidate_selection_score(
     holdout: dict | None,
     holdout_stress: dict | None,
     rolling_holdout: dict | None = None,
+    confirmation: dict | None = None,
 ) -> float:
     weighted_score = train.get("score", 0.0) * 0.20 + validation.get("score", 0.0) * 0.35
     weight = 0.55
@@ -801,6 +926,9 @@ def _candidate_selection_score(
     if rolling_holdout:
         weighted_score += rolling_holdout.get("score", 0.0) * 0.30
         weight += 0.30
+    if confirmation:
+        weighted_score += confirmation.get("score", 0.0) * 0.20
+        weight += 0.20
     return round(weighted_score / weight, 4)
 
 
@@ -825,6 +953,60 @@ def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float, settin
         child["short_enabled"] = True
     _repair_genome(child, settings)
     return child
+
+
+def _neighbor_genome(parent: dict, rng: random.Random, settings: dict) -> dict:
+    child = copy.deepcopy(parent)
+    mutation_rate = float(settings["confirmation_mutation_rate"])
+    changed = False
+    param_keys = [
+        key for key in PARAM_SPACE
+        if key not in {"session_start_hour", "session_end_hour"} or child.get("session_enabled")
+    ]
+    for key in param_keys:
+        if rng.random() < mutation_rate:
+            child[key] = _mutate_value(child.get(key), PARAM_SPACE[key], rng)
+            changed = True
+
+    weights = dict(child.get("weights") or {})
+    for key, spec in WEIGHT_SPACE.items():
+        if rng.random() < mutation_rate:
+            weights[key] = _mutate_value(weights.get(key), spec, rng)
+            changed = True
+    child["weights"] = weights
+
+    if not changed:
+        key = rng.choice(param_keys or list(PARAM_SPACE))
+        child[key] = _mutate_value(child.get(key), PARAM_SPACE[key], rng)
+
+    child["long_enabled"] = bool(parent.get("long_enabled", True))
+    child["short_enabled"] = bool(parent.get("short_enabled", True))
+    child["session_enabled"] = bool(parent.get("session_enabled", False))
+    _repair_genome(child, settings)
+    return child
+
+
+def _genome_delta(base: dict, candidate: dict) -> dict:
+    delta = {
+        key: candidate.get(key)
+        for key in PARAM_SPACE
+        if candidate.get(key) != base.get(key)
+    }
+    weight_delta = {
+        key: (candidate.get("weights") or {}).get(key)
+        for key in WEIGHT_SPACE
+        if (candidate.get("weights") or {}).get(key) != (base.get("weights") or {}).get(key)
+    }
+    if weight_delta:
+        delta["weights"] = weight_delta
+    return delta
+
+
+def _confirmation_stress_settings(settings: dict) -> dict:
+    stress_settings = dict(settings)
+    stress_settings["min_holdout_profit_factor"] = settings["min_stress_profit_factor"]
+    stress_settings["min_holdout_return_pct"] = settings["min_stress_return_pct"]
+    return stress_settings
 
 
 def genome_to_rules_text(genome: dict) -> str:
@@ -1127,6 +1309,7 @@ def _ai_review(result: dict) -> dict | None:
             "holdout_metrics": result["best_candidate"].get("holdout_metrics"),
             "holdout_stress_metrics": result["best_candidate"].get("holdout_stress_metrics"),
             "rolling_holdout_metrics": result["best_candidate"].get("rolling_holdout_metrics"),
+            "confirmation_metrics": result["best_candidate"].get("confirmation_metrics"),
             "gates": result["best_candidate"].get("gates", {}),
             "symbol_group": result["best_candidate"].get("symbol_group"),
             "symbols": result["best_candidate"].get("symbols", []),

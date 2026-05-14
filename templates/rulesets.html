@@ -317,7 +317,11 @@
       ? ` ${validation.reasons.join(' ')}`
       : '';
     const when = validation.validated_at ? ` on ${new Date(validation.validated_at).toLocaleString()}` : '';
-    el.innerHTML = `<strong style="color:${color}">Validation ${validation.status}${when}.</strong>${reasons}`;
+    const confirmation = (validation.metrics || {}).confirmation || {};
+    const confirmText = confirmation.neighbor_count != null
+      ? `<br><span class="small">Confirmation neighbors ${confirmation.neighbor_passes || 0}/${confirmation.neighbor_count} (${((confirmation.neighbor_pass_ratio || 0) * 100).toFixed(0)}%)</span>`
+      : '';
+    el.innerHTML = `<strong style="color:${color}">Validation ${validation.status}${when}.</strong>${reasons}${confirmText}`;
   }
 
   // ---- Ruleset list ----
