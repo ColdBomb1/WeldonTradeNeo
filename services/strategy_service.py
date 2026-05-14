@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import List, Optional
 
@@ -782,6 +782,9 @@ class ResearchGenomeStrategy(BaseStrategy):
             {"name": "rsi_sell_max", "type": "float", "label": "RSI sell max", "default": 58.0},
             {"name": "sl_atr_multiplier", "type": "float", "label": "SL ATR", "default": 2.0},
             {"name": "tp_rr", "type": "float", "label": "TP risk/reward", "default": 1.7},
+            {"name": "session_enabled", "type": "bool", "label": "Entry session filter", "default": False},
+            {"name": "session_start_hour", "type": "int", "label": "Session start UTC", "default": 7},
+            {"name": "session_end_hour", "type": "int", "label": "Session end UTC", "default": 20},
         ]
 
     def default_params(self) -> dict:
@@ -811,6 +814,9 @@ class ResearchGenomeStrategy(BaseStrategy):
             "breakout_lookback": 20,
             "sl_atr_multiplier": 2.0,
             "tp_rr": 1.7,
+            "session_enabled": False,
+            "session_start_hour": 7,
+            "session_end_hour": 20,
             "weights": {
                 "trend": 1.0,
                 "ema_stack": 0.9,
@@ -862,6 +868,8 @@ class ResearchGenomeStrategy(BaseStrategy):
         p = self._merged(params)
         price = pre["closes"][i]
         ts = datetime.fromisoformat(candles[i]["time"])
+        if p.get("session_enabled", False) and not self._within_session(ts, p):
+            return Signal(SignalType.HOLD, price, ts, "Outside entry session", confidence=0.0)
         if i < max(int(p["trend_ema"]), int(p["bb_period"]), int(p["macd_slow"]) + int(p["macd_signal"]), 30):
             return Signal(SignalType.HOLD, price, ts, "Indicators not ready", confidence=0.0)
 
@@ -967,6 +975,19 @@ class ResearchGenomeStrategy(BaseStrategy):
             else:
                 merged[key] = value
         return merged
+
+    @staticmethod
+    def _within_session(ts: datetime, p: dict) -> bool:
+        if ts.tzinfo is not None:
+            ts = ts.astimezone(timezone.utc)
+        start = max(0, min(23, int(p.get("session_start_hour", 7))))
+        end = max(0, min(24, int(p.get("session_end_hour", 20))))
+        hour = ts.hour
+        if start == end:
+            return True
+        if start < end:
+            return start <= hour < end
+        return hour >= start or hour < end
 
     @staticmethod
     def _rolling_avg(values: List[Optional[float]], period: int) -> List[Optional[float]]:

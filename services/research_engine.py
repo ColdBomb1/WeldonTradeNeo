@@ -89,6 +89,8 @@ PARAM_SPACE = {
     "breakout_lookback": (12, 48, 2),
     "sl_atr_multiplier": (1.2, 3.2, 0.1),
     "tp_rr": (1.2, 2.6, 0.1),
+    "session_start_hour": (0, 23, 1),
+    "session_end_hour": (1, 24, 1),
 }
 
 WEIGHT_SPACE = {
@@ -702,6 +704,8 @@ def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float) -> dic
         child["long_enabled"] = not bool(child.get("long_enabled", True))
     if rng.random() < mutation_rate * 0.25:
         child["short_enabled"] = not bool(child.get("short_enabled", True))
+    if rng.random() < mutation_rate * 0.5:
+        child["session_enabled"] = not bool(child.get("session_enabled", False))
     if not child.get("long_enabled") and not child.get("short_enabled"):
         child["long_enabled"] = True
         child["short_enabled"] = True
@@ -726,6 +730,8 @@ def genome_to_rules_text(genome: dict) -> str:
         f"{genome.get('bb_std')}/{genome.get('bb_near_pct')}\n"
         f"ATR ratio filter: {genome.get('atr_min_ratio')}-{genome.get('atr_max_ratio')}\n"
         f"SL: {genome.get('sl_atr_multiplier')}x ATR; TP: {genome.get('tp_rr')}R\n\n"
+        f"Entry session filter: enabled={bool(genome.get('session_enabled', False))}, "
+        f"UTC {genome.get('session_start_hour', 7)}-{genome.get('session_end_hour', 20)}\n\n"
         "Weights:\n"
         + "\n".join(f"- {k}: {v}" for k, v in sorted(weights.items()))
     )
@@ -916,6 +922,8 @@ def _repair_genome(genome: dict) -> None:
         genome["rsi_buy_min"], genome["rsi_buy_max"] = 42.0, 68.0
     if float(genome.get("rsi_sell_min", 32)) >= float(genome.get("rsi_sell_max", 58)):
         genome["rsi_sell_min"], genome["rsi_sell_max"] = 32.0, 58.0
+    genome["session_start_hour"] = max(0, min(23, int(genome.get("session_start_hour", 7))))
+    genome["session_end_hour"] = max(1, min(24, int(genome.get("session_end_hour", 20))))
 
 
 def _parse_dt(value: str) -> datetime:
