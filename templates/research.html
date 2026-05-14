@@ -22,6 +22,13 @@
       </label>
       <label>Start <input type="date" id="start" /></label>
       <label>End <input type="date" id="end" /></label>
+      <label>Symbol Mode
+        <select id="symbol-mode">
+          <option value="per_symbol" {% if defaults.symbol_mode == 'per_symbol' %}selected{% endif %}>Per symbol</option>
+          <option value="clustered" {% if defaults.symbol_mode == 'clustered' %}selected{% endif %}>Preset clusters</option>
+          <option value="global" {% if defaults.symbol_mode == 'global' %}selected{% endif %}>All selected</option>
+        </select>
+      </label>
     </div>
     <div class="row">
       <label>Symbols
@@ -46,7 +53,7 @@
       <label>Holdout Days <input type="number" id="holdout-days" min="0" max="120" value="{{ defaults.holdout_days }}" /></label>
       <label>Min Holdout Trades <input type="number" id="min-holdout-trades" min="1" max="500" value="{{ defaults.min_holdout_trades }}" /></label>
       <label>Cost Stress x <input type="number" id="cost-stress" min="1" max="5" step="0.1" value="{{ defaults.cost_stress_multiplier }}" /></label>
-      <label>AI Review <input type="checkbox" id="ai-review" {% if defaults.ai_review %}checked{% endif %} /></label>
+      <label>AI Review <input type="checkbox" id="ai-review-enabled" {% if defaults.ai_review %}checked{% endif %} /></label>
       <div class="button-wrap" style="align-self:flex-end">
         <button type="button" id="start-btn">Start Research</button>
       </div>
@@ -84,11 +91,13 @@
         <tr>
           <th>Rank</th>
           <th>Status</th>
+          <th>Group</th>
           <th>Score</th>
           <th>Train</th>
           <th>Validation</th>
           <th>Holdout</th>
           <th>Stress</th>
+          <th>Ruleset</th>
           <th>Reasons</th>
         </tr>
       </thead>
@@ -96,7 +105,7 @@
     </table>
 
     <h3>AI Review</h3>
-    <div id="ai-review" style="white-space:pre-wrap;font-size:13px;max-height:300px;overflow:auto"></div>
+    <div id="ai-review-output" style="white-space:pre-wrap;font-size:13px;max-height:300px;overflow:auto"></div>
   </section>
 </main>
 {% endblock %}
@@ -177,11 +186,13 @@
     const vm = best.validation_metrics || {};
     const hm = best.holdout_metrics || {};
     const hsm = best.holdout_stress_metrics || best.validation_stress_metrics || {};
+    const bestGroup = best.symbol_group || 'global';
     document.getElementById('detail').style.display = '';
     document.getElementById('detail-title').textContent = `Run #${run.id}: ${run.name}`;
     document.getElementById('summary').innerHTML = `
       <div class="status-item"><span class="status-label">Status</span><span class="status-value">${badge(run.status)}</span></div>
       <div class="status-item"><span class="status-label">Gate</span><span class="status-value">${best.passed ? 'passed' : 'not passed'}</span></div>
+      <div class="status-item"><span class="status-label">Group</span><span class="status-value">${bestGroup} ${(best.symbols||[]).join(', ')}</span></div>
       <div class="status-item"><span class="status-label">Train</span><span class="status-value">${fmtMetric(tm)}</span></div>
       <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${fmtMetric(vm)}</span></div>
       <div class="status-item"><span class="status-label">Holdout</span><span class="status-value">${fmtMetric(hm)}</span></div>
@@ -200,16 +211,18 @@
       row.innerHTML = `
         <td>${c.rank}</td>
         <td>${c.passed ? '<span style="color:#27ae60;font-weight:600">passed</span>' : '<span style="color:#e74c3c">failed</span>'}</td>
+        <td>${c.symbol_group || '--'}<br><span class="small">${(c.symbols||[]).join(', ')}</span></td>
         <td>${c.score?.toFixed(3) ?? '--'}</td>
         <td>${fmtMetric(tm)}</td>
         <td>${fmtMetric(m)}</td>
         <td>${fmtMetric(hm)}</td>
         <td>${fmtMetric(sm)}</td>
+        <td>${c.ruleset_id ? `<a href="/rulesets" onclick="event.stopPropagation()">#${c.ruleset_id}</a>` : '--'}</td>
         <td class="small">${compactReasons(c.reasons)}</td>
       `;
       tbody.appendChild(row);
     });
-    document.getElementById('ai-review').textContent = run.result?.ai_review
+    document.getElementById('ai-review-output').textContent = run.result?.ai_review
       ? JSON.stringify(run.result.ai_review, null, 2)
       : 'No AI review recorded.';
     document.getElementById('detail').scrollIntoView({ behavior: 'smooth' });
@@ -221,8 +234,9 @@
     const p = await resp.json();
     if (p.error) return;
     const bm = p.best_metrics || {};
+    const group = p.group ? ` | group ${p.group} ${p.group_index || '--'}/${p.group_count || '--'}` : '';
     document.getElementById('progress').innerHTML =
-      `Run #${activeRunId}: ${p.status} | generation ${p.generation}/${p.generations} | candidate ${p.candidate || '--'}/${p.population_size || '--'} | best score ${p.best_score ?? '--'} | trades ${bm.total_trades ?? '--'} | return ${bm.return_pct ?? '--'}%`;
+      `Run #${activeRunId}: ${p.status}${group} | generation ${p.generation}/${p.generations} | candidate ${p.candidate || '--'}/${p.population_size || '--'} | best score ${p.best_score ?? '--'} | trades ${bm.total_trades ?? '--'} | return ${bm.return_pct ?? '--'}%`;
     if (p.status !== 'running') {
       clearInterval(pollTimer); pollTimer = null;
       activeRunId = null;
@@ -252,6 +266,7 @@
         population_size: parseInt(document.getElementById('population').value) || 18,
         generations: parseInt(document.getElementById('generations').value) || 5,
         folds: parseInt(document.getElementById('folds').value) || 3,
+        symbol_mode: document.getElementById('symbol-mode').value,
         max_drawdown_pct: parseFloat(document.getElementById('max-dd').value) || 6,
         min_profit_factor: parseFloat(document.getElementById('min-pf').value) || 1.15,
         min_train_profit_factor: parseFloat(document.getElementById('min-train-pf').value) || 1,
@@ -261,7 +276,7 @@
         min_holdout_trades: parseInt(document.getElementById('min-holdout-trades').value) || 20,
         cost_stress_multiplier: parseFloat(document.getElementById('cost-stress').value) || 1.5,
         risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,
-        ai_review: document.getElementById('ai-review').checked,
+        ai_review: document.getElementById('ai-review-enabled').checked,
       },
     };
     const resp = await fetch('/api/research/start', {

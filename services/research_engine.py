@@ -26,6 +26,7 @@ _research_progress: dict[int, dict] = {}
 
 
 DEFAULT_SETTINGS = {
+    "symbol_mode": "per_symbol",
     "population_size": 18,
     "generations": 5,
     "elite_count": 4,
@@ -59,10 +60,18 @@ DEFAULT_SETTINGS = {
     "min_positive_month_ratio": 0.45,
     "max_month_loss_pct": 3.0,
     "min_monthly_tests_for_gate": 3,
+    "persist_group_winners": True,
     "mutation_rate": 0.35,
     "seed": None,
     "ai_review": False,
 }
+
+PRESET_SYMBOL_GROUPS = [
+    {"name": "eur-gbp", "symbols": ["EURUSD", "GBPUSD"]},
+    {"name": "aud-nzd", "symbols": ["AUDUSD", "NZDUSD"]},
+    {"name": "jpy", "symbols": ["USDJPY"]},
+    {"name": "cad-chf", "symbols": ["USDCAD", "USDCHF"]},
+]
 
 PARAM_SPACE = {
     "min_score": (2.2, 4.6, 0.1),
@@ -107,6 +116,10 @@ def normalize_settings(raw: dict | None) -> dict:
     raw = raw or {}
     settings = dict(DEFAULT_SETTINGS)
     settings.update({k: v for k, v in raw.items() if v is not None})
+    if str(settings.get("symbol_mode", "")).lower() not in {"global", "per_symbol", "clustered", "custom"}:
+        settings["symbol_mode"] = DEFAULT_SETTINGS["symbol_mode"]
+    else:
+        settings["symbol_mode"] = str(settings["symbol_mode"]).lower()
     settings["population_size"] = max(6, min(80, int(settings["population_size"])))
     settings["generations"] = max(1, min(40, int(settings["generations"])))
     settings["elite_count"] = max(1, min(settings["population_size"], int(settings["elite_count"])))
@@ -139,6 +152,7 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["min_positive_month_ratio"] = max(0.0, min(1.0, float(settings["min_positive_month_ratio"])))
     settings["max_month_loss_pct"] = max(0.1, min(50.0, float(settings["max_month_loss_pct"])))
     settings["min_monthly_tests_for_gate"] = max(1, min(1000, int(settings["min_monthly_tests_for_gate"])))
+    settings["persist_group_winners"] = _coerce_bool(settings["persist_group_winners"])
     settings["mutation_rate"] = max(0.01, min(1.0, float(settings["mutation_rate"])))
     settings["ai_review"] = _coerce_bool(settings["ai_review"])
     return settings
@@ -165,7 +179,6 @@ def run_research(
     settings: dict,
 ) -> dict:
     settings = normalize_settings(settings)
-    rng = random.Random(settings.get("seed") or run_id)
     _active_research[run_id] = False
 
     windows = {
@@ -184,11 +197,13 @@ def run_research(
         symbol: _window_summary(candles_by_symbol[symbol], windows[symbol])
         for symbol in usable_symbols
     }
+    symbol_groups = _build_symbol_groups(usable_symbols, settings)
+    if not symbol_groups:
+        raise ValueError("No usable symbol groups were available for research")
 
-    population = _initial_population(rng, settings["population_size"])
     generations: list[dict] = []
-    best_seen: dict | None = None
-    last_scored: list[dict] = []
+    candidates: list[dict] = []
+    best_progress: dict | None = None
 
     _research_progress[run_id] = {
         "run_id": run_id,
@@ -196,150 +211,113 @@ def run_research(
         "generation": 0,
         "generations": settings["generations"],
         "symbols": usable_symbols,
+        "symbol_mode": settings["symbol_mode"],
+        "symbol_groups": symbol_groups,
+        "group": None,
+        "group_index": 0,
+        "group_count": len(symbol_groups),
         "split_summary": split_summary,
         "best_score": None,
         "best_metrics": None,
     }
 
-    for generation in range(1, settings["generations"] + 1):
+    for group_idx, group in enumerate(symbol_groups, start=1):
         if _active_research.get(run_id):
             break
+        group_symbols = group["symbols"]
+        group_candles = {symbol: candles_by_symbol[symbol] for symbol in group_symbols}
+        group_windows = {symbol: windows[symbol] for symbol in group_symbols}
+        group_rng = random.Random(f"{settings.get('seed') or run_id}:{group['name']}")
+        population = _initial_population(group_rng, settings["population_size"])
+        best_seen: dict | None = None
+        last_scored: list[dict] = []
 
-        scored = []
-        for idx, genome in enumerate(population, start=1):
+        for generation in range(1, settings["generations"] + 1):
             if _active_research.get(run_id):
                 break
-            metrics = evaluate_genome(
-                genome,
-                candles_by_symbol,
-                windows,
-                "train",
-                timeframe,
-                settings,
-            )
-            scored.append({"genome": genome, "train_metrics": metrics, "score": metrics["score"]})
-            if best_seen is None or metrics["score"] > best_seen["score"]:
-                best_seen = scored[-1]
-            _research_progress[run_id].update({
+            scored = []
+            for idx, genome in enumerate(population, start=1):
+                if _active_research.get(run_id):
+                    break
+                metrics = evaluate_genome(
+                    genome,
+                    group_candles,
+                    group_windows,
+                    "train",
+                    timeframe,
+                    settings,
+                )
+                scored.append({"genome": genome, "train_metrics": metrics, "score": metrics["score"]})
+                if best_seen is None or metrics["score"] > best_seen["score"]:
+                    best_seen = scored[-1]
+                if best_progress is None or metrics["score"] > best_progress["score"]:
+                    best_progress = scored[-1]
+                _research_progress[run_id].update({
+                    "group": group["name"],
+                    "group_index": group_idx,
+                    "group_symbols": group_symbols,
+                    "generation": generation,
+                    "candidate": idx,
+                    "population_size": len(population),
+                    "best_score": round(best_progress["score"], 4) if best_progress else None,
+                    "best_metrics": best_progress.get("train_metrics") if best_progress else None,
+                })
+
+            scored.sort(key=lambda item: item["score"], reverse=True)
+            last_scored = scored
+            gen_summary = {
+                "group": group["name"],
+                "group_index": group_idx,
+                "symbols": group_symbols,
                 "generation": generation,
-                "candidate": idx,
-                "population_size": len(population),
-                "best_score": round(best_seen["score"], 4) if best_seen else None,
-                "best_metrics": best_seen.get("train_metrics") if best_seen else None,
-            })
+                "best_score": scored[0]["score"] if scored else None,
+                "best_metrics": scored[0]["train_metrics"] if scored else None,
+                "avg_score": sum(item["score"] for item in scored) / len(scored) if scored else 0,
+            }
+            generations.append(gen_summary)
+            if not scored:
+                break
 
-        scored.sort(key=lambda item: item["score"], reverse=True)
-        last_scored = scored
-        gen_summary = {
-            "generation": generation,
-            "best_score": scored[0]["score"] if scored else None,
-            "best_metrics": scored[0]["train_metrics"] if scored else None,
-            "avg_score": sum(item["score"] for item in scored) / len(scored) if scored else 0,
-        }
-        generations.append(gen_summary)
-        if not scored:
-            break
+            elites = scored[: settings["elite_count"]]
+            next_population = [copy.deepcopy(item["genome"]) for item in elites]
+            while len(next_population) < settings["population_size"]:
+                parent = group_rng.choice(elites)["genome"]
+                next_population.append(mutate_genome(parent, group_rng, settings["mutation_rate"]))
+            population = next_population
 
-        elites = scored[: settings["elite_count"]]
-        next_population = [copy.deepcopy(item["genome"]) for item in elites]
-        while len(next_population) < settings["population_size"]:
-            parent = rng.choice(elites)["genome"]
-            next_population.append(mutate_genome(parent, rng, settings["mutation_rate"]))
-        population = next_population
+        top_train = []
+        seen_genomes = set()
+        for item in ([best_seen] if best_seen else []) + last_scored:
+            if not item:
+                continue
+            key = repr(sorted((item.get("genome") or {}).items()))
+            if key in seen_genomes:
+                continue
+            seen_genomes.add(key)
+            top_train.append(item)
+        top_train = sorted(
+            top_train,
+            key=lambda item: item["train_metrics"]["score"],
+            reverse=True,
+        )[: settings["validation_top_n"]]
 
-    top_train = []
-    seen_genomes = set()
-    for item in ([best_seen] if best_seen else []) + last_scored:
-        if not item:
-            continue
-        key = repr(sorted((item.get("genome") or {}).items()))
-        if key in seen_genomes:
-            continue
-        seen_genomes.add(key)
-        top_train.append(item)
-    top_train = sorted(
-        top_train,
-        key=lambda item: item["train_metrics"]["score"],
-        reverse=True,
-    )[: settings["validation_top_n"]]
-
-    candidates = []
-    for rank, item in enumerate(top_train, start=1):
-        genome = item["genome"]
-        train_gate = score_train(item["train_metrics"], settings)
-        validation = evaluate_genome(genome, candles_by_symbol, windows, "validation", timeframe, settings)
-        validation_gate = score_validation(validation, settings)
-        stress_multiplier = float(settings["cost_stress_multiplier"])
-        validation_stress = None
-        validation_stress_gate = {"passed": True, "status": "passed", "reasons": []}
-        if stress_multiplier > 1.0:
-            validation_stress = evaluate_genome(
-                genome,
-                candles_by_symbol,
-                windows,
-                "validation",
-                timeframe,
-                settings,
-                spread_multiplier=stress_multiplier,
+        group_candidates = []
+        for item in top_train:
+            candidate = _evaluate_candidate(
+                item=item,
+                group=group,
+                group_index=group_idx,
+                group_candles=group_candles,
+                group_windows=group_windows,
+                timeframe=timeframe,
+                settings=settings,
             )
-            validation_stress_gate = score_cost_stress(validation_stress, settings, "Validation stress")
-
-        holdout = None
-        holdout_gate = {"passed": True, "status": "passed", "reasons": []}
-        holdout_stress = None
-        holdout_stress_gate = {"passed": True, "status": "passed", "reasons": []}
-        if settings["holdout_enabled"]:
-            if any(w["holdout"] for w in windows.values()):
-                holdout = evaluate_genome(genome, candles_by_symbol, windows, "holdout", timeframe, settings)
-                holdout_gate = score_holdout(holdout, settings)
-                if stress_multiplier > 1.0:
-                    holdout_stress = evaluate_genome(
-                        genome,
-                        candles_by_symbol,
-                        windows,
-                        "holdout",
-                        timeframe,
-                        settings,
-                        spread_multiplier=stress_multiplier,
-                    )
-                    holdout_stress_gate = score_cost_stress(holdout_stress, settings, "Holdout stress")
-            else:
-                holdout_gate = {
-                    "passed": False,
-                    "status": "failed",
-                    "reasons": ["Holdout enabled but no holdout windows were available."],
-                }
-
-        gates = {
-            "train": train_gate,
-            "validation": validation_gate,
-            "validation_stress": validation_stress_gate,
-            "holdout": holdout_gate,
-            "holdout_stress": holdout_stress_gate,
-        }
-        reasons = _collect_gate_reasons(gates)
-        passed = not reasons
-        selection_score = _candidate_selection_score(
-            train=item["train_metrics"],
-            validation=validation,
-            validation_stress=validation_stress,
-            holdout=holdout,
-            holdout_stress=holdout_stress,
-        )
-        candidates.append({
-            "rank": rank,
-            "generation": settings["generations"],
-            "genome": genome,
-            "train_metrics": item["train_metrics"],
-            "validation_metrics": validation,
-            "validation_stress_metrics": validation_stress,
-            "holdout_metrics": holdout,
-            "holdout_stress_metrics": holdout_stress,
-            "gates": gates,
-            "score": selection_score,
-            "passed": passed,
-            "reasons": reasons,
-        })
+            group_candidates.append(candidate)
+        group_candidates.sort(key=lambda item: (item["passed"], item["score"]), reverse=True)
+        for group_rank, candidate in enumerate(group_candidates, start=1):
+            candidate["group_rank"] = group_rank
+            candidate["is_group_winner"] = group_rank == 1
+        candidates.extend(group_candidates)
 
     candidates.sort(key=lambda item: (item["passed"], item["score"]), reverse=True)
     for idx, candidate in enumerate(candidates, start=1):
@@ -349,6 +327,8 @@ def run_research(
         "status": "stopped" if _active_research.get(run_id) else "completed",
         "timeframe": timeframe,
         "symbols": usable_symbols,
+        "symbol_mode": settings["symbol_mode"],
+        "symbol_groups": symbol_groups,
         "settings": settings,
         "split_summary": split_summary,
         "generations": generations,
@@ -370,6 +350,96 @@ def run_research(
     })
     _active_research.pop(run_id, None)
     return result
+
+
+def _evaluate_candidate(
+    *,
+    item: dict,
+    group: dict,
+    group_index: int,
+    group_candles: dict[str, list[dict]],
+    group_windows: dict[str, dict[str, list[tuple[int, int]]]],
+    timeframe: str,
+    settings: dict,
+) -> dict:
+    genome = item["genome"]
+    train_gate = score_train(item["train_metrics"], settings)
+    validation = evaluate_genome(genome, group_candles, group_windows, "validation", timeframe, settings)
+    validation_gate = score_validation(validation, settings)
+    stress_multiplier = float(settings["cost_stress_multiplier"])
+    validation_stress = None
+    validation_stress_gate = {"passed": True, "status": "passed", "reasons": []}
+    if stress_multiplier > 1.0:
+        validation_stress = evaluate_genome(
+            genome,
+            group_candles,
+            group_windows,
+            "validation",
+            timeframe,
+            settings,
+            spread_multiplier=stress_multiplier,
+        )
+        validation_stress_gate = score_cost_stress(validation_stress, settings, "Validation stress")
+
+    holdout = None
+    holdout_gate = {"passed": True, "status": "passed", "reasons": []}
+    holdout_stress = None
+    holdout_stress_gate = {"passed": True, "status": "passed", "reasons": []}
+    if settings["holdout_enabled"]:
+        if any(w["holdout"] for w in group_windows.values()):
+            holdout = evaluate_genome(genome, group_candles, group_windows, "holdout", timeframe, settings)
+            holdout_gate = score_holdout(holdout, settings)
+            if stress_multiplier > 1.0:
+                holdout_stress = evaluate_genome(
+                    genome,
+                    group_candles,
+                    group_windows,
+                    "holdout",
+                    timeframe,
+                    settings,
+                    spread_multiplier=stress_multiplier,
+                )
+                holdout_stress_gate = score_cost_stress(holdout_stress, settings, "Holdout stress")
+        else:
+            holdout_gate = {
+                "passed": False,
+                "status": "failed",
+                "reasons": ["Holdout enabled but no holdout windows were available."],
+            }
+
+    gates = {
+        "train": train_gate,
+        "validation": validation_gate,
+        "validation_stress": validation_stress_gate,
+        "holdout": holdout_gate,
+        "holdout_stress": holdout_stress_gate,
+    }
+    reasons = _collect_gate_reasons(gates)
+    return {
+        "rank": 0,
+        "group_rank": 0,
+        "is_group_winner": False,
+        "symbol_group": group["name"],
+        "group_index": group_index,
+        "symbols": list(group["symbols"]),
+        "generation": settings["generations"],
+        "genome": genome,
+        "train_metrics": item["train_metrics"],
+        "validation_metrics": validation,
+        "validation_stress_metrics": validation_stress,
+        "holdout_metrics": holdout,
+        "holdout_stress_metrics": holdout_stress,
+        "gates": gates,
+        "score": _candidate_selection_score(
+            train=item["train_metrics"],
+            validation=validation,
+            validation_stress=validation_stress,
+            holdout=holdout,
+            holdout_stress=holdout_stress,
+        ),
+        "passed": not reasons,
+        "reasons": reasons,
+    }
 
 
 def evaluate_genome(
@@ -668,6 +738,57 @@ def _initial_population(rng: random.Random, size: int) -> list[dict]:
     return population
 
 
+def _build_symbol_groups(usable_symbols: list[str], settings: dict) -> list[dict]:
+    selected = list(dict.fromkeys(usable_symbols))
+    selected_set = set(selected)
+    mode = settings.get("symbol_mode", "global")
+    if mode == "global":
+        return [{"name": "global", "symbols": selected}] if selected else []
+    if mode == "per_symbol":
+        return [{"name": symbol, "symbols": [symbol]} for symbol in selected]
+    if mode == "custom":
+        groups = _normalize_custom_symbol_groups(settings.get("symbol_groups"), selected_set)
+        if groups:
+            return groups
+
+    groups: list[dict] = []
+    assigned: set[str] = set()
+    for group in PRESET_SYMBOL_GROUPS:
+        symbols = [symbol for symbol in group["symbols"] if symbol in selected_set]
+        if symbols:
+            groups.append({"name": group["name"], "symbols": symbols})
+            assigned.update(symbols)
+    for symbol in selected:
+        if symbol not in assigned:
+            groups.append({"name": symbol, "symbols": [symbol]})
+    return groups
+
+
+def _normalize_custom_symbol_groups(raw_groups: Any, selected_set: set[str]) -> list[dict]:
+    if not isinstance(raw_groups, list):
+        return []
+    groups = []
+    assigned: set[str] = set()
+    for idx, raw in enumerate(raw_groups, start=1):
+        if isinstance(raw, dict):
+            name = str(raw.get("name") or f"group-{idx}")[:64]
+            raw_symbols = raw.get("symbols") or []
+        else:
+            name = f"group-{idx}"
+            raw_symbols = raw
+        if not isinstance(raw_symbols, list):
+            continue
+        symbols = []
+        for symbol in raw_symbols:
+            symbol = str(symbol).upper()
+            if symbol in selected_set and symbol not in assigned:
+                symbols.append(symbol)
+                assigned.add(symbol)
+        if symbols:
+            groups.append({"name": name, "symbols": symbols})
+    return groups
+
+
 def _build_windows(candles: list[dict], folds: int, settings: dict | None = None) -> dict[str, list[tuple[int, int]]]:
     settings = settings or DEFAULT_SETTINGS
     n = len(candles)
@@ -815,9 +936,12 @@ def _ai_review(result: dict) -> dict | None:
             "holdout_metrics": result["best_candidate"].get("holdout_metrics"),
             "holdout_stress_metrics": result["best_candidate"].get("holdout_stress_metrics"),
             "gates": result["best_candidate"].get("gates", {}),
+            "symbol_group": result["best_candidate"].get("symbol_group"),
+            "symbols": result["best_candidate"].get("symbols", []),
             "genome": result["best_candidate"]["genome"],
         },
         "settings": result["settings"],
+        "symbol_groups": result.get("symbol_groups", []),
         "split_summary": result.get("split_summary", {}),
     }
     return ai_service.generate_json(

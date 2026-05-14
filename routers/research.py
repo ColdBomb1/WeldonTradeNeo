@@ -105,6 +105,10 @@ def get_research_run(run_id: int) -> JSONResponse:
                     "validation_stress_metrics": result_candidates.get(c.rank, {}).get("validation_stress_metrics"),
                     "holdout_metrics": result_candidates.get(c.rank, {}).get("holdout_metrics"),
                     "holdout_stress_metrics": result_candidates.get(c.rank, {}).get("holdout_stress_metrics"),
+                    "symbol_group": result_candidates.get(c.rank, {}).get("symbol_group"),
+                    "symbols": result_candidates.get(c.rank, {}).get("symbols"),
+                    "group_rank": result_candidates.get(c.rank, {}).get("group_rank"),
+                    "is_group_winner": result_candidates.get(c.rank, {}).get("is_group_winner"),
                     "gates": result_candidates.get(c.rank, {}).get("gates"),
                     "reasons": result_candidates.get(c.rank, {}).get("reasons", []),
                     "score": c.score,
@@ -241,62 +245,36 @@ def _persist_result(run_id: int, result: dict) -> None:
         run.completed_at = now
 
         best = result.get("best_candidate")
-        ruleset_id = None
+        ruleset_ids_by_rank: dict[int, int] = {}
         if best:
-            validation = {
-                "status": "passed" if best.get("passed") else "failed",
-                "passed": bool(best.get("passed")),
-                "validated_at": now.isoformat(),
-                "method": "walk_forward_train_validation_holdout_research",
-                "criteria": result.get("settings", {}),
-                "reasons": best.get("reasons", []),
-                "gates": best.get("gates", {}),
-                "metrics": {
-                    "train": best.get("train_metrics"),
-                    "validation": best.get("validation_metrics"),
-                    "validation_stress": best.get("validation_stress_metrics"),
-                    "holdout": best.get("holdout_metrics"),
-                    "holdout_stress": best.get("holdout_stress_metrics"),
-                },
-            }
-            genome = best.get("genome") or {}
-            rs = RuleSet(
-                name=f"Research candidate run {run_id}"[:128],
-                description="Structured walk-forward research candidate. Promote only after review.",
-                status="validated" if validation["passed"] else "candidate",
-                rules_text=research_engine.genome_to_rules_text(genome),
-                parameters={
-                    "candidate": True,
-                    "execution_engine": "research_genome",
-                    "strategy_schema": genome,
-                    "research_run_id": run_id,
-                    "validation": validation,
-                },
-                symbols=result.get("symbols") or run.symbols,
-                timeframes=[result.get("timeframe") or run.timeframe],
-                version=1,
-                performance_metrics={
-                    **(best.get("holdout_metrics") or best.get("validation_metrics") or {}),
-                    "train_metrics": best.get("train_metrics"),
-                    "validation_metrics": best.get("validation_metrics"),
-                    "validation_stress_metrics": best.get("validation_stress_metrics"),
-                    "holdout_metrics": best.get("holdout_metrics"),
-                    "holdout_stress_metrics": best.get("holdout_stress_metrics"),
-                    "gates": best.get("gates", {}),
-                    "failure_reasons": best.get("reasons", []),
-                    "validated": validation["passed"],
-                    "validation_status": validation["status"],
-                    "selection_basis": "train_validation_holdout_cost_stress",
-                    "research_run_id": run_id,
-                },
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(rs)
-            session.flush()
-            ruleset_id = rs.id
-            run.candidate_ruleset_id = ruleset_id
-            result["candidate_ruleset_id"] = ruleset_id
+            settings = result.get("settings", {})
+            to_persist = []
+            if settings.get("persist_group_winners") and result.get("symbol_mode") != "global":
+                to_persist = [
+                    item for item in result.get("top_candidates", [])
+                    if item.get("is_group_winner")
+                ]
+            if not to_persist:
+                to_persist = [best]
+            if best not in to_persist:
+                to_persist.insert(0, best)
+
+            for item in to_persist:
+                rs = _candidate_to_ruleset(run_id, item, result, run, now)
+                session.add(rs)
+                session.flush()
+                rank = int(item.get("rank") or 0)
+                if rank:
+                    ruleset_ids_by_rank[rank] = rs.id
+                item["ruleset_id"] = rs.id
+                if rank == int(best.get("rank") or 0):
+                    run.candidate_ruleset_id = rs.id
+                    result["candidate_ruleset_id"] = rs.id
+
+            result["candidate_ruleset_ids"] = [
+                {"rank": rank, "ruleset_id": rs_id}
+                for rank, rs_id in sorted(ruleset_ids_by_rank.items())
+            ]
             run.result = result
 
         for item in result.get("top_candidates", []):
@@ -309,7 +287,7 @@ def _persist_result(run_id: int, result: dict) -> None:
                 validation_metrics=item.get("validation_metrics"),
                 score=float(item.get("score") or 0.0),
                 passed=bool(item.get("passed")),
-                ruleset_id=ruleset_id if int(item.get("rank") or 0) == 1 else None,
+                ruleset_id=ruleset_ids_by_rank.get(int(item.get("rank") or 0)),
                 created_at=now,
             )
             session.add(candidate)
@@ -319,6 +297,69 @@ def _persist_result(run_id: int, result: dict) -> None:
         raise
     finally:
         session.close()
+
+
+def _candidate_to_ruleset(run_id: int, item: dict, result: dict, run: ResearchRun, now: datetime) -> RuleSet:
+    validation = {
+        "status": "passed" if item.get("passed") else "failed",
+        "passed": bool(item.get("passed")),
+        "validated_at": now.isoformat(),
+        "method": "walk_forward_train_validation_holdout_research",
+        "criteria": result.get("settings", {}),
+        "reasons": item.get("reasons", []),
+        "gates": item.get("gates", {}),
+        "metrics": {
+            "train": item.get("train_metrics"),
+            "validation": item.get("validation_metrics"),
+            "validation_stress": item.get("validation_stress_metrics"),
+            "holdout": item.get("holdout_metrics"),
+            "holdout_stress": item.get("holdout_stress_metrics"),
+        },
+    }
+    genome = item.get("genome") or {}
+    symbols = item.get("symbols") or result.get("symbols") or run.symbols
+    group_name = item.get("symbol_group") or "global"
+    label = f"{group_name} #{item.get('rank')}" if group_name != "global" else f"rank {item.get('rank')}"
+    return RuleSet(
+        name=f"Research run {run_id} {label}"[:128],
+        description="Structured walk-forward research candidate. Promote only after review.",
+        status="validated" if validation["passed"] else "candidate",
+        rules_text=(
+            research_engine.genome_to_rules_text(genome)
+            + f"\n\nSymbol group: {group_name}\n"
+            + f"Symbols: {', '.join(symbols)}"
+        ),
+        parameters={
+            "candidate": True,
+            "execution_engine": "research_genome",
+            "strategy_schema": genome,
+            "research_run_id": run_id,
+            "research_symbol_group": group_name,
+            "validation": validation,
+        },
+        symbols=symbols,
+        timeframes=[result.get("timeframe") or run.timeframe],
+        version=1,
+        performance_metrics={
+            **(item.get("holdout_metrics") or item.get("validation_metrics") or {}),
+            "symbol_group": group_name,
+            "train_metrics": item.get("train_metrics"),
+            "validation_metrics": item.get("validation_metrics"),
+            "validation_stress_metrics": item.get("validation_stress_metrics"),
+            "holdout_metrics": item.get("holdout_metrics"),
+            "holdout_stress_metrics": item.get("holdout_stress_metrics"),
+            "gates": item.get("gates", {}),
+            "failure_reasons": item.get("reasons", []),
+            "validated": validation["passed"],
+            "validation_status": validation["status"],
+            "selection_basis": "train_validation_holdout_cost_stress",
+            "research_run_id": run_id,
+            "research_rank": item.get("rank"),
+            "group_rank": item.get("group_rank"),
+        },
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def _parse_dt(value: str) -> datetime:
