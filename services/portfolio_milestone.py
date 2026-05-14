@@ -128,6 +128,13 @@ def search_candidate_portfolios(session, payload: dict | None, cfg) -> dict:
             "candidate_count": 0,
             "top_portfolios": [],
         }
+    prefilter_per_group = int(
+        payload.get("prefilter_per_group")
+        if payload.get("prefilter_per_group") is not None
+        else (5 if include_candidates else 0)
+    )
+    if prefilter_per_group > 0:
+        scopes = _prefilter_scopes(scopes, prefilter_per_group)
 
     common_end = options["end_date"] or min(item["latest"] for item in scopes)
     short_eval = evaluate_scope_windows(
@@ -216,6 +223,7 @@ def search_candidate_portfolios(session, payload: dict | None, cfg) -> dict:
         "targets": targets,
         "statuses": sorted(statuses),
         "include_candidates": include_candidates,
+        "prefiltered_scope_count": len(scopes),
         "candidate_count": len(candidates),
         "groups": [
             {
@@ -228,6 +236,43 @@ def search_candidate_portfolios(session, payload: dict | None, cfg) -> dict:
         "best_passing": next((p for p in portfolios if p["status"]["passed"]), None),
         "top_portfolios": portfolios[:top_limit],
     }
+
+
+def _prefilter_scopes(scopes: list[dict], max_per_group: int) -> list[dict]:
+    grouped: dict[tuple[str, str], list[dict]] = {}
+    for scope in scopes:
+        grouped.setdefault((scope["symbol"], scope["timeframe"]), []).append(scope)
+    selected = []
+    for group_scopes in grouped.values():
+        selected.extend(
+            sorted(group_scopes, key=_stored_scope_score, reverse=True)[:max_per_group]
+        )
+    return selected
+
+
+def _stored_scope_score(scope: dict) -> float:
+    rs = scope["ruleset"]
+    metrics = rs.performance_metrics or {}
+    params = rs.parameters or {}
+    validation = params.get("validation") or {}
+    validation_metrics = validation.get("metrics") or {}
+    metric_sets = [
+        metrics,
+        _as_dict(metrics.get("holdout_metrics")),
+        _as_dict(metrics.get("rolling_holdout_metrics")),
+        _as_dict(validation_metrics.get("holdout")),
+        _as_dict(validation_metrics.get("rolling_holdout")),
+    ]
+    best_return = max((float(m.get("return_pct") or -100.0) for m in metric_sets), default=-100.0)
+    best_pf = max((float(m.get("profit_factor") or 0.0) for m in metric_sets), default=0.0)
+    best_dd = min((float(m.get("max_drawdown") or 1.0) for m in metric_sets), default=1.0)
+    status_bonus = {"active": 0.2, "validated": 0.5, "candidate": 0.0}.get(str(rs.status), 0.0)
+    passed_bonus = 0.4 if (validation.get("passed") is True or metrics.get("validated") is True) else 0.0
+    return best_return * 2.0 + min(best_pf, 4.0) - best_dd * 100.0 * 0.15 + status_bonus + passed_bonus
+
+
+def _as_dict(value: Any) -> dict:
+    return value if isinstance(value, dict) else {}
 
 
 def build_structured_scopes(session, rulesets: list[RuleSet]) -> list[dict]:

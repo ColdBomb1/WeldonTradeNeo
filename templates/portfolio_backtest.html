@@ -360,6 +360,7 @@
       const body = {
         ...baseMilestoneBody(),
         include_candidates: document.getElementById('include-candidates').checked,
+        prefilter_per_group: document.getElementById('include-candidates').checked ? 5 : 0,
         top_per_group: 8,
         beam_width: 200,
         top_portfolios: 10,
