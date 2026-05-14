@@ -12,7 +12,7 @@ from db import get_session
 from models.candle import Candle
 from models.trade_plan import BacktestRun, TradePlan
 from services.backtest_engine import BacktestConfig, run_backtest
-from services.claude_service import compute_price_summary
+from services.ai_service import compute_price_summary
 from services.optimizer import (
     DEFAULT_SEARCH_SPACES,
     OptimizationConfig,
@@ -515,7 +515,7 @@ async def claude_analyze_results(request: Request) -> JSONResponse:
 
     Body: { symbol, timeframe, results_markdown }
     """
-    from services import claude_service
+    from services import ai_service
 
     payload = await request.json()
     symbol = payload.get("symbol", "EURUSD")
@@ -532,7 +532,7 @@ async def claude_analyze_results(request: Request) -> JSONResponse:
     ).count()
     session.close()
 
-    analysis = claude_service.analyze_optimization_results(
+    analysis = ai_service.analyze_optimization_results(
         symbol=symbol,
         timeframe=timeframe,
         candle_count=candle_count,
@@ -559,7 +559,7 @@ async def run_claude_suggestions(request: Request) -> JSONResponse:
         rank_by: str (optional),
     }
     """
-    from services.claude_service import _parse_json_response
+    from services.ai_service import parse_json_response
     from services.strategy_service import STRATEGIES
 
     payload = await request.json()
@@ -586,7 +586,7 @@ async def run_claude_suggestions(request: Request) -> JSONResponse:
         end_date = end_date.replace(tzinfo=timezone.utc)
 
     # Parse suggestions from Claude response
-    parsed = _parse_json_response(claude_response)
+    parsed = parse_json_response(claude_response)
     if parsed is None:
         return JSONResponse({"error": "Could not parse strategy suggestions from response."}, status_code=400)
 

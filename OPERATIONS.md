@@ -37,6 +37,12 @@ and restarts the app.
 - Uvicorn stdout/stderr: `C:\WeldonTradeNeo\logs\uvicorn.stdout.log`, `C:\WeldonTradeNeo\logs\uvicorn.stderr.log`
 - App log: `C:\WeldonTradeNeo\logs\app.log`
 
+## Local AI
+
+Provider-neutral AI configuration and the recommended reverse-tunnel topology
+are documented in `LOCAL_AI.md`. Keep live trading paused while changing the AI
+provider, model, rule text, or drawdown settings.
+
 ## Runtime Files Preserved During Deploy
 
 These stay on the server and are not deployed from source:

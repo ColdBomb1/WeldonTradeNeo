@@ -206,10 +206,19 @@ def check_risk_limits(symbol: str, side: str) -> tuple[bool, str]:
             if total_loss_pct >= ex.max_total_loss_pct:
                 return False, f"Total loss limit ({ex.max_total_loss_pct}%) reached ({total_loss_pct:.1f}%) — STOP TRADING"
 
-        # Circuit breaker (weekly/monthly)
+        # Circuit breaker (daily/weekly/monthly/relative drawdown)
         cb_ok, cb_reason = risk_manager.check_drawdown_circuit_breaker()
         if not cb_ok:
             return False, cb_reason
+
+        agg_ok, agg_reason = risk_manager.check_aggregate_open_risk(
+            candidate_risk_pct=risk_manager.get_effective_risk_per_trade_pct(cfg)
+        )
+        if not agg_ok:
+            return False, agg_reason
+        effective_risk_pct = risk_manager.get_effective_risk_per_trade_pct(cfg)
+        if effective_risk_pct <= 0:
+            return False, "Effective risk per trade is 0% due to drawdown limits"
 
         # Correlation check
         corr_ok, corr_reason = risk_manager.check_correlation(symbol, side)
@@ -297,8 +306,9 @@ def _execute_on_account(
         return trade
 
     balance = _get_account_balance(account)
+    risk_pct = risk_manager.get_effective_risk_per_trade_pct()
     volume = compute_position_size(
-        balance, ex.risk_per_trade_pct, sl_distance, sig.symbol, ex.default_lot_type
+        balance, risk_pct, sl_distance, sig.symbol, ex.default_lot_type
     )
     service = _get_trade_service(account.account_type)
     if not service:
@@ -432,8 +442,9 @@ def execute_signal(signal_id: int) -> dict:
             account = _get_trading_account()
             if account:
                 balance = _get_account_balance(account)
+            risk_pct = risk_manager.get_effective_risk_per_trade_pct(cfg)
             volume = compute_position_size(
-                balance, ex.risk_per_trade_pct, sl_distance, sig.symbol, ex.default_lot_type
+                balance, risk_pct, sl_distance, sig.symbol, ex.default_lot_type
             )
             trade = LiveTrade(
                 signal_id=sig.id, symbol=sig.symbol, side=sig.side,
@@ -684,7 +695,8 @@ def _sync_positions_once():
         session.commit()
 
         # Kick off post-trade analysis in background threads (don't block sync)
-        if just_closed and cfg.claude.enabled:
+        from services import ai_service
+        if just_closed and ai_service.is_enabled(cfg):
             for trade in just_closed:
                 trade_id = trade.id
                 threading.Thread(
@@ -702,9 +714,9 @@ def _sync_positions_once():
 
 
 def _run_post_trade_analysis(trade_id: int):
-    """Background: analyze a just-closed trade with Claude and store results."""
+    """Background: analyze a just-closed trade with AI and store results."""
     import threading
-    from services import claude_service, news_service
+    from services import ai_service, news_service
     from services.rule_engine import _compute_indicators
     from models.candle import Candle
 
@@ -714,7 +726,7 @@ def _run_post_trade_analysis(trade_id: int):
         if not trade or trade.status != "closed":
             return
 
-        # Build context for Claude
+        # Build context for AI analysis
         trade_data = {
             "symbol": trade.symbol,
             "side": trade.side,
@@ -771,8 +783,8 @@ def _run_post_trade_analysis(trade_id: int):
         except Exception:
             pass
 
-        # Call Claude for analysis
-        analysis = claude_service.analyze_closed_trade(trade_data)
+        # Call configured AI provider for analysis
+        analysis = ai_service.analyze_closed_trade(trade_data)
 
         # Store result
         trade.trade_analysis = analysis

@@ -1,6 +1,6 @@
-"""Claude rule-based strategy engine.
+"""AI rule-based strategy engine.
 
-Claude IS the strategy. Rules are natural language text that Claude interprets
+The configured AI provider interprets natural language rules
 against market data to make trade decisions. Rules evolve through training.
 """
 
@@ -16,7 +16,7 @@ from db import get_session
 from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun, TrainingIteration
-from services import claude_service, indicator_service, lessons_service
+from services import ai_service, indicator_service, lessons_service
 
 logger = logging.getLogger(__name__)
 
@@ -115,23 +115,21 @@ def evaluate_rules(
     lessons_text: str | None = None,
     multi_tf_candles: dict[str, list[dict]] | None = None,
 ) -> dict:
-    """Evaluate current market state using Claude as a discretionary analyst.
+    """Evaluate current market state using the configured AI as a discretionary analyst.
 
     Rules are treated as a considerations framework + named setup templates —
     not hard triggers. Recent trade lessons are injected as memory, and when
     `multi_tf_candles` is provided (e.g. {'1h': [...], '4h': [...]}), higher-
-    timeframe context is included so Claude can form directional bias before
+    timeframe context is included so the model can form directional bias before
     scoring the entry-timeframe trigger.
 
     Returns: {"signal": "BUY/SELL/HOLD", "confidence": 0-1,
               "stop_loss": float|None, "take_profit": float|None,
               "reasoning": str}
     """
-    client = claude_service._get_client()
-    if client is None:
-        return {"signal": "HOLD", "confidence": 0, "reasoning": "Claude API not available"}
-
     cfg = load_config()
+    if not ai_service.is_enabled(cfg):
+        return {"signal": "HOLD", "confidence": 0, "reasoning": "AI provider not available"}
 
     # Build context
     if indicators is None:
@@ -154,50 +152,14 @@ def evaluate_rules(
     )
 
     try:
-        # Prompt-cache the system prompt and the rules/schema block. The 7
-        # symbols scanned back-to-back at each 15m bar-close share an identical
-        # prefix; caching drops calls 2..7 to ~10% input cost for that prefix.
-        # Default ephemeral TTL is 5 min — the full burst fits well inside it.
-        response = client.messages.create(
-            model=cfg.claude.model,
+        parsed = ai_service.generate_json(
+            system=_EVAL_SYSTEM_PROMPT,
+            prompt=f"{static_ctx}\n\n{dynamic_ctx}",
+            cfg=cfg,
             max_tokens=1024,
             temperature=0.2,
-            system=[
-                {
-                    "type": "text",
-                    "text": _EVAL_SYSTEM_PROMPT,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": static_ctx,
-                            "cache_control": {"type": "ephemeral"},
-                        },
-                        {
-                            "type": "text",
-                            "text": dynamic_ctx,
-                        },
-                    ],
-                }
-            ],
+            fallback=None,
         )
-        usage = getattr(response, "usage", None)
-        if usage is not None:
-            logger.info(
-                "Claude eval %s %s: input=%d cache_read=%d cache_write=%d output=%d",
-                symbol, timeframe,
-                getattr(usage, "input_tokens", 0),
-                getattr(usage, "cache_read_input_tokens", 0),
-                getattr(usage, "cache_creation_input_tokens", 0),
-                getattr(usage, "output_tokens", 0),
-            )
-        text = response.content[0].text
-        parsed = claude_service._parse_json_response(text)
         if parsed is None:
             return {"signal": "HOLD", "confidence": 0, "reasoning": "Could not parse response"}
 
@@ -701,18 +663,16 @@ def evaluate_rules_batch(
     position_state: str,
     news_events: list[dict] | None = None,
 ) -> list[dict]:
-    """Evaluate rules across a batch of candles in a single Claude call.
+    """Evaluate rules across a batch of candles in a single AI call.
 
     Includes indicator snapshots at start, middle, and end of the chunk
-    so Claude can accurately detect crossovers throughout the window.
+    so the model can accurately detect crossovers throughout the window.
 
     Returns list of signal dicts: [{"bar_index": int, "signal": "BUY/SELL", ...}]
     """
-    client = claude_service._get_client()
-    if client is None:
-        return []
-
     cfg = load_config()
+    if not ai_service.is_enabled(cfg):
+        return []
 
     # Format chunk candles compactly
     chunk_text = "\n".join(
@@ -781,10 +741,7 @@ def evaluate_rules_batch(
     )
 
     try:
-        response = client.messages.create(
-            model=cfg.claude.model,
-            max_tokens=2048,
-            temperature=0.2,
+        parsed = ai_service.generate_json(
             system=(
                 "You are a forex trading rule interpreter. Scan the candle window and "
                 "identify ALL bars where ANY entry rule condition is met. "
@@ -793,10 +750,12 @@ def evaluate_rules_batch(
                 "(rsi_crossed_above_30, macd_crossed_bullish, etc.) — trust them directly. "
                 "Return a JSON array. Empty array [] if no signals. No text outside JSON."
             ),
-            messages=[{"role": "user", "content": prompt}],
+            prompt=prompt,
+            cfg=cfg,
+            max_tokens=2048,
+            temperature=0.2,
+            fallback=None,
         )
-        text = response.content[0].text
-        parsed = claude_service._parse_json_response(text)
         if parsed is None:
             return []
         if isinstance(parsed, dict):
@@ -904,7 +863,7 @@ def backtest_rules(
     all_pair_candles: dict[str, list[dict]] | None = None,
     training_run_id: int | None = None,
 ) -> dict:
-    """Backtest rules by walking through candle history with Claude evaluation.
+    """Backtest rules by walking through candle history with AI evaluation.
 
     Modes:
       - "bar_by_bar": One Claude call per bar (most accurate, slowest)
@@ -1584,17 +1543,15 @@ def evolve_rules(
     prev_rules: str | None = None,
     consistency_text: str = "",
 ) -> dict:
-    """Ask Claude to evolve rules based on cross-pair backtest performance.
+    """Ask the configured AI provider to evolve rules based on cross-pair backtest performance.
 
     per_symbol_metrics: {"EURUSD": {metrics}, "GBPUSD": {metrics}, ...}
     consistency_text: pass-to-pass variance data for same rules
     Returns: {"evolved_rules": str, "changes_made": [str], "reasoning": str}
     """
-    client = claude_service._get_client()
-    if client is None:
-        return {"error": "Claude API not available"}
-
     cfg = load_config()
+    if not ai_service.is_enabled(cfg):
+        return {"error": "AI provider not available"}
 
     prev_text = ""
     if prev_rules and prev_rules != rules_text:
@@ -1681,11 +1638,15 @@ def evolve_rules(
             "- Each rule must be specific enough for another AI to interpret unambiguously\n"
             "- Always respond with valid JSON only"
         )
-        response = claude_service._review_create(client, cfg, system, prompt)
-        text = claude_service._extract_text(response)
-        parsed = claude_service._parse_json_response(text)
+        parsed = ai_service.generate_json(
+            system=system,
+            prompt=prompt,
+            cfg=cfg,
+            review=True,
+            fallback=None,
+        )
         if parsed is None:
-            return {"error": "Could not parse response", "raw": text}
+            return {"error": "Could not parse response"}
         # Unwrap if Opus returned a list instead of a dict
         if isinstance(parsed, list):
             parsed = parsed[0] if parsed and isinstance(parsed[0], dict) else {"error": "Unexpected list response"}

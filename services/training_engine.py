@@ -1,6 +1,6 @@
-"""Autonomous training engine: replay historical data, iterate with Claude feedback.
+"""Autonomous training engine: replay historical data, iterate with AI feedback.
 
-Runs backtest → evaluate → Claude suggests adjustments → re-run → compare → repeat
+Runs backtest, evaluates results, asks the configured AI for adjustments, then repeats
 until convergence or max iterations. Produces a deployment-ready configuration.
 """
 
@@ -16,7 +16,7 @@ from models.candle import Candle
 from models.training import TrainingRun, TrainingIteration
 from services.backtest_engine import BacktestConfig, run_backtest
 from services.strategy_service import STRATEGIES
-from services import claude_service
+from services import ai_service
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ def _is_stopped(run_id: int) -> bool:
 
 
 def _heuristic_adjust(strategy, current_params: dict, metrics: dict) -> dict | None:
-    """Generate parameter adjustments without Claude, based on performance metrics.
+    """Generate parameter adjustments without AI, based on performance metrics.
 
     Returns adjusted params dict, or None if no more adjustments to try.
     """
@@ -122,7 +122,7 @@ def _load_candles(symbol: str, timeframe: str, start_date: datetime, end_date: d
 
 
 def _build_trade_summary(trades: list[dict], max_trades: int = 20) -> str:
-    """Format trade list into a concise summary for Claude."""
+    """Format trade list into a concise summary for AI analysis."""
     if not trades:
         return "No trades executed."
 
@@ -223,7 +223,7 @@ def run_training_for_combo(
     prev_metrics = None
     prev_params = None
     iterations = []
-    claude_available = True  # disable after first API failure
+    model_available = True  # disable after first provider failure
 
     for iteration in range(1, tc.max_iterations + 1):
         if _is_stopped(run_id):
@@ -264,15 +264,15 @@ def run_training_for_combo(
         if prev_metrics is not None:
             improvement = _compute_improvement(metrics, prev_metrics, tc.rank_by)
 
-        # Build trade summary for Claude
+        # Build trade summary for AI analysis
         trade_summary = _build_trade_summary(results.trades)
 
-        # Claude analysis (if enabled)
-        claude_analysis = None
+        # AI analysis (if enabled)
+        model_analysis = None
         suggested_params = None
 
-        if tc.use_claude_evaluation and cfg.claude.enabled and claude_available:
-            claude_analysis = claude_service.analyze_training_iteration(
+        if tc.use_model_evaluation and ai_service.is_enabled(cfg) and model_available:
+            model_analysis = ai_service.analyze_training_iteration(
                 strategy_type=strategy_type,
                 parameters=params,
                 metrics=metrics,
@@ -283,12 +283,12 @@ def run_training_for_combo(
                 previous_params=prev_params,
             )
 
-            if "error" in claude_analysis:
-                logger.warning("Claude unavailable, switching to heuristic mode: %s",
-                               claude_analysis["error"])
-                claude_available = False
-            elif "adjusted_parameters" in claude_analysis:
-                suggested_params = claude_analysis["adjusted_parameters"]
+            if "error" in model_analysis:
+                logger.warning("AI provider unavailable, switching to heuristic mode: %s",
+                               model_analysis["error"])
+                model_available = False
+            elif "adjusted_parameters" in model_analysis:
+                suggested_params = model_analysis["adjusted_parameters"]
 
         # Store iteration in DB
         session = get_session()
@@ -309,7 +309,7 @@ def run_training_for_combo(
                 avg_monthly_return=results.avg_monthly_return,
                 equity_curve=results.equity_curve,
                 trades=results.trades,
-                claude_analysis=claude_analysis,
+                claude_analysis=model_analysis,
                 suggested_params=suggested_params,
                 improvement_pct=improvement,
                 created_at=datetime.now(timezone.utc),
@@ -379,7 +379,7 @@ def run_training_for_combo(
                     valid_params[pname] = params.get(pname, p["default"])
             params = valid_params
         else:
-            # No Claude suggestions — use heuristic adjustments
+            # No AI suggestions - use heuristic adjustments
             params = _heuristic_adjust(strategy, params, metrics)
             if params is None:
                 break  # No more adjustments possible
@@ -470,8 +470,8 @@ def run_training(
 
         # Generate final report
         final_report = None
-        if all_iterations and cfg.training.use_claude_evaluation and cfg.claude.enabled:
-            final_report = claude_service.generate_training_report(all_iterations)
+        if all_iterations and cfg.training.use_model_evaluation and ai_service.is_enabled(cfg):
+            final_report = ai_service.generate_training_report(all_iterations)
 
         # Update run as completed
         session = get_session()

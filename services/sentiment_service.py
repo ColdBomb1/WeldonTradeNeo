@@ -1,4 +1,4 @@
-"""Market sentiment analysis via Claude and news headlines.
+"""Market sentiment analysis via the configured AI provider and news headlines.
 
 Computes a sentiment score (-1.0 bearish to +1.0 bullish) for currency
 pairs based on recent news and economic context.
@@ -12,7 +12,7 @@ from datetime import datetime, timedelta, timezone
 from config import load_config
 from db import get_session
 from models.news import SentimentScore
-from services import claude_service, news_service
+from services import ai_service, news_service
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 def compute_sentiment(symbol: str) -> dict:
     """Compute sentiment for a currency pair using available context.
 
-    Uses Claude (if enabled) to analyze upcoming events and market context.
+    Uses the configured AI provider (if enabled) to analyze upcoming events and market context.
     Returns {"score": float, "reasoning": str, "source": str}.
     """
     cfg = load_config()
@@ -31,20 +31,15 @@ def compute_sentiment(symbol: str) -> dict:
     high_events = [e for e in events if e["impact"] == "high"]
     medium_events = [e for e in events if e["impact"] == "medium"]
 
-    # If Claude is enabled, use it for sentiment analysis
-    if cfg.claude.enabled and cfg.news.sentiment_enabled:
-        return _claude_sentiment(symbol, events)
+    if ai_service.is_enabled(cfg) and cfg.news.sentiment_enabled:
+        return _model_sentiment(symbol, events)
 
     # Fallback: rule-based sentiment from event count and direction
     return _rule_based_sentiment(symbol, high_events, medium_events)
 
 
-def _claude_sentiment(symbol: str, events: list[dict]) -> dict:
-    """Use Claude to analyze sentiment based on upcoming events."""
-    client = claude_service._get_client()
-    if client is None:
-        return {"score": 0.0, "reasoning": "Claude not available", "source": "fallback"}
-
+def _model_sentiment(symbol: str, events: list[dict]) -> dict:
+    """Use the configured AI provider to analyze sentiment based on upcoming events."""
     cfg = load_config()
     base = symbol[:3]
     quote = symbol[3:6]
@@ -72,26 +67,26 @@ def _claude_sentiment(symbol: str, events: list[dict]) -> dict:
     )
 
     try:
-        response = client.messages.create(
-            model=cfg.claude.model,
+        parsed = ai_service.generate_json(
+            system="You are a forex market sentiment analyst. Provide concise JSON assessments.",
+            prompt=prompt,
+            cfg=cfg,
             max_tokens=512,
             temperature=0.2,
-            system="You are a forex market sentiment analyst. Provide concise JSON assessments.",
-            messages=[{"role": "user", "content": prompt}],
+            fallback=None,
         )
-        text = response.content[0].text
-        parsed = claude_service._parse_json_response(text)
         if parsed and "score" in parsed:
             score = max(-1.0, min(1.0, float(parsed["score"])))
+            source = "claude_analysis" if cfg.ai.provider == "claude" else "model_analysis"
             result = {
                 "score": score,
                 "reasoning": parsed.get("reasoning", ""),
-                "source": "claude_analysis",
+                "source": source,
             }
-            _store_sentiment(symbol, score, "claude_analysis", parsed)
+            _store_sentiment(symbol, score, source, parsed)
             return result
     except Exception as exc:
-        logger.error("Claude sentiment error: %s", exc)
+        logger.error("AI sentiment error: %s", exc)
 
     return {"score": 0.0, "reasoning": "Analysis failed", "source": "fallback"}
 
@@ -101,7 +96,7 @@ def _rule_based_sentiment(
     high_events: list[dict],
     medium_events: list[dict],
 ) -> dict:
-    """Simple rule-based sentiment when Claude is unavailable.
+    """Simple rule-based sentiment when AI analysis is unavailable.
 
     - High-impact events nearby → neutral (uncertainty)
     - No events → slightly bullish bias (risk-on default)

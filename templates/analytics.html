@@ -90,8 +90,8 @@
   </section>
 
   <section class="card">
-    <h2>Claude Performance Review</h2>
-    <button type="button" id="review-btn">Run Claude Review</button>
+    <h2>AI Performance Review</h2>
+    <button type="button" id="review-btn">Run AI Review</button>
     <div id="review-output" style="margin-top:10px;white-space:pre-wrap;font-size:14px"></div>
   </section>
 </main>
@@ -256,7 +256,7 @@
     const resp = await fetch('/api/analytics/claude-review', { method: 'POST' });
     const data = await resp.json();
     btn.disabled = false;
-    btn.textContent = 'Run Claude Review';
+    btn.textContent = 'Run AI Review';
 
     if (data.error) {
       output.textContent = 'Error: ' + data.error;

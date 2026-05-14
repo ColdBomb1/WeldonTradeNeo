@@ -13,7 +13,7 @@ from db import get_session
 from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun
-from services import rule_engine
+from services import ai_service, rule_engine
 from services.strategy_service import list_strategies
 
 router = APIRouter(tags=["rulesets"])
@@ -444,9 +444,9 @@ async def train_ruleset(rs_id: int, request: Request) -> JSONResponse:
             # Generate final report
             final_report = None
             cfg = load_config()
-            if iterations and cfg.claude.enabled:
+            if iterations and ai_service.is_enabled(cfg):
                 final_report = await asyncio.to_thread(
-                    claude_service.generate_training_report, iterations,
+                    ai_service.generate_training_report, iterations,
                 )
             sess = get_session()
             try:
@@ -477,7 +477,6 @@ async def train_ruleset(rs_id: int, request: Request) -> JSONResponse:
         finally:
             rule_engine._active_trains.pop(run_id, None)
 
-    from services import claude_service
     asyncio.create_task(_run())
 
     return JSONResponse({"ok": True, "run_id": run_id})

@@ -109,20 +109,36 @@ async def update_settings(request: Request):
     except ValueError:
         pass
 
-    # Claude API
-    claude_key = str(form.get("claude_api_key", cfg.claude.api_key)).strip()
-    if claude_key:
-        cfg.claude.api_key = claude_key
-    cfg.claude.model = str(form.get("claude_model", cfg.claude.model)).strip() or cfg.claude.model
-    cfg.claude.review_model = str(form.get("claude_review_model", cfg.claude.review_model)).strip() or cfg.claude.review_model
+    # AI provider
+    provider = str(form.get("ai_provider", cfg.ai.provider)).strip().lower()
+    if provider in {"claude", "ollama", "openai_compatible"}:
+        cfg.ai.provider = provider
+    cfg.ai.base_url = str(form.get("ai_base_url", cfg.ai.base_url)).strip() or cfg.ai.base_url
+    cfg.ai.api_key = str(form.get("ai_api_key", cfg.ai.api_key)).strip()
+    cfg.ai.model = str(form.get("ai_model", cfg.ai.model)).strip() or cfg.ai.model
+    cfg.ai.review_model = str(form.get("ai_review_model", cfg.ai.review_model)).strip() or cfg.ai.review_model
     try:
-        cfg.claude.temperature = max(0.0, min(1.0, float(form.get("claude_temperature", cfg.claude.temperature))))
+        cfg.ai.temperature = max(0.0, min(1.0, float(form.get("ai_temperature", cfg.ai.temperature))))
     except (ValueError, TypeError):
         pass
-    cfg.claude.enabled = bool(form.get("claude_enabled"))
-    # Reset cached client when API key changes
-    from services import claude_service
-    claude_service.reset_client()
+    try:
+        cfg.ai.timeout_sec = max(5.0, min(600.0, float(form.get("ai_timeout_sec", cfg.ai.timeout_sec))))
+    except (ValueError, TypeError):
+        pass
+    cfg.ai.enabled = bool(form.get("ai_enabled"))
+
+    # Keep the legacy Claude config in sync when Claude is the selected provider.
+    if cfg.ai.provider == "claude":
+        cfg.claude.enabled = cfg.ai.enabled
+        cfg.claude.api_key = cfg.ai.api_key
+        cfg.claude.model = cfg.ai.model
+        cfg.claude.review_model = cfg.ai.review_model
+        cfg.claude.temperature = cfg.ai.temperature
+    else:
+        cfg.claude.enabled = False
+
+    from services import ai_service
+    ai_service.reset_client()
 
     # Signal generation
     cfg.signals.enabled = bool(form.get("signals_enabled"))
@@ -138,14 +154,15 @@ async def update_settings(request: Request):
     except (ValueError, TypeError):
         pass
     try:
-        cfg.signals.max_signals_per_day = max(1, min(100, int(form.get("signals_max_per_day", cfg.signals.max_signals_per_day))))
+        cfg.signals.max_signals_per_day = max(0, min(100, int(form.get("signals_max_per_day", cfg.signals.max_signals_per_day))))
     except (ValueError, TypeError):
         pass
     try:
         cfg.signals.cool_down_minutes = max(5, min(1440, int(form.get("signals_cool_down_minutes", cfg.signals.cool_down_minutes))))
     except (ValueError, TypeError):
         pass
-    cfg.signals.require_claude_confirmation = bool(form.get("signals_require_claude"))
+    cfg.signals.require_model_review = bool(form.get("signals_require_model"))
+    cfg.signals.require_claude_confirmation = cfg.signals.require_model_review
 
     # News & Calendar
     cfg.news.enabled = bool(form.get("news_enabled"))
@@ -165,11 +182,35 @@ async def update_settings(request: Request):
     except (ValueError, TypeError):
         pass
     try:
-        cfg.execution.max_daily_loss_pct = max(1.0, min(10.0, float(form.get("execution_max_daily_loss", cfg.execution.max_daily_loss_pct))))
+        cfg.execution.min_risk_per_trade_pct = max(0.0, min(cfg.execution.risk_per_trade_pct, float(form.get("execution_min_risk_pct", cfg.execution.min_risk_per_trade_pct))))
     except (ValueError, TypeError):
         pass
     try:
-        cfg.execution.max_total_loss_pct = max(1.0, min(20.0, float(form.get("execution_max_total_loss", cfg.execution.max_total_loss_pct))))
+        cfg.execution.max_daily_loss_pct = max(0.1, min(10.0, float(form.get("execution_max_daily_loss", cfg.execution.max_daily_loss_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.max_total_loss_pct = max(0.1, min(20.0, float(form.get("execution_max_total_loss", cfg.execution.max_total_loss_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.account_start_balance = max(0.0, float(form.get("execution_account_start_balance", cfg.execution.account_start_balance)))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.max_relative_drawdown_pct = max(0.1, min(20.0, float(form.get("execution_max_relative_drawdown", cfg.execution.max_relative_drawdown_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.drawdown_hard_stop_buffer_pct = max(0.0, min(5.0, float(form.get("execution_drawdown_buffer", cfg.execution.drawdown_hard_stop_buffer_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.risk_reduction_drawdown_pct = max(0.0, min(20.0, float(form.get("execution_risk_reduction_drawdown", cfg.execution.risk_reduction_drawdown_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.max_aggregate_open_risk_pct = max(0.0, min(10.0, float(form.get("execution_max_aggregate_risk", cfg.execution.max_aggregate_open_risk_pct))))
     except (ValueError, TypeError):
         pass
     try:

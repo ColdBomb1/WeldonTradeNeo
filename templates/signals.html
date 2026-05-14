@@ -67,7 +67,7 @@
   <section class="card" id="detail-section" style="display:none">
     <h2 id="detail-title">Signal Detail</h2>
     <div class="status-grid" id="detail-grid"></div>
-    <h3>Claude's Reasoning</h3>
+    <h3>AI Reasoning</h3>
     <div id="detail-reasoning" style="white-space:pre-wrap;font-size:13px;background:#f5f0e6;padding:12px;border-radius:6px;max-height:300px;overflow-y:auto"></div>
   </section>
 </main>
@@ -166,7 +166,7 @@
     if (s.reason) text += s.reason + '\n\n';
     if (s.claude_analysis && typeof s.claude_analysis === 'object') {
       const a = s.claude_analysis;
-      if (a.reasoning) text += 'Claude: ' + a.reasoning + '\n';
+      if (a.reasoning) text += 'AI: ' + a.reasoning + '\n';
       if (a.signal) text += 'Signal: ' + a.signal + '\n';
       if (a.confidence != null) text += 'Confidence: ' + (a.confidence * 100).toFixed(0) + '%\n';
       if (a.stop_loss) text += 'Suggested SL: ' + a.stop_loss + '\n';

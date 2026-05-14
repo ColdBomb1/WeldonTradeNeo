@@ -76,7 +76,9 @@ def _get_client():
         logger.error("anthropic package not installed — run: pip install anthropic")
         return None
     cfg = load_config()
-    api_key = (cfg.claude.api_key or "").strip()
+    ai_cfg = getattr(cfg, "ai", None)
+    api_key = (getattr(ai_cfg, "api_key", "") if getattr(ai_cfg, "provider", "") == "claude" else "")
+    api_key = (api_key or cfg.claude.api_key or "").strip()
     if not api_key:
         logger.warning("Claude API key not configured in data/config.json")
         return None

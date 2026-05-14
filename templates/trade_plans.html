@@ -237,8 +237,8 @@
         </thead>
         <tbody></tbody>
       </table>
-      <h3 style="margin-top: 16px;">Export for Claude Analysis</h3>
-      <p class="small">Copy the text below and paste it into a Claude conversation for AI-powered strategy analysis — no API cost.</p>
+      <h3 style="margin-top: 16px;">Export for AI Analysis</h3>
+      <p class="small">Copy the text below and paste it into an AI conversation for strategy analysis.</p>
       <textarea id="opt-export" readonly style="min-height: 200px; font-family: monospace; font-size: 12px;"></textarea>
       <button type="button" onclick="copyExport()" class="btn-sm" style="margin-top: 8px;">Copy to Clipboard</button>
     </div>
@@ -246,8 +246,8 @@
 
   <!-- Claude-in-the-Loop Workflow -->
   <section class="card">
-    <h2>Claude Strategy Advisor</h2>
-    <p class="small">Three-step AI workflow: (1) Generate context prompt, (2) Paste into Claude &amp; get suggestions, (3) Run optimizer on those suggestions and get review feedback. Zero API cost — uses your Claude Pro subscription.</p>
+    <h2>AI Strategy Advisor</h2>
+    <p class="small">Three-step workflow: (1) Generate context prompt, (2) get model suggestions, (3) run optimizer on those suggestions and review the results.</p>
 
     <!-- Step 1: Generate Prompt -->
     <h3>Step 1 — Generate Context Prompt</h3>
@@ -287,9 +287,9 @@
 
     <!-- Step 2: Paste Claude's Response -->
     <div id="cw-step2" class="hidden" style="margin-top: 24px;">
-      <h3>Step 2 — Paste Claude's Response</h3>
-      <p class="small">Copy the prompt above into a Claude conversation. After Claude responds with strategy suggestions, paste the full response below.</p>
-      <textarea id="cw-claude-response" placeholder="Paste Claude's full response here (including the JSON array)..." style="min-height: 200px; font-family: monospace; font-size: 12px;"></textarea>
+      <h3>Step 2 - Paste AI Response</h3>
+      <p class="small">Copy the prompt above into an AI conversation. After the model responds with strategy suggestions, paste the full response below.</p>
+      <textarea id="cw-claude-response" placeholder="Paste the full model response here (including the JSON array)..." style="min-height: 200px; font-family: monospace; font-size: 12px;"></textarea>
       <div class="row" style="margin-top: 8px;">
         <label>
           Rank By
@@ -342,8 +342,8 @@
       <h3>Step 3 — Results &amp; Review</h3>
       <div id="cw-results-container"></div>
 
-      <h3 style="margin-top: 16px;">Review Prompt for Claude</h3>
-      <p class="small">Copy and paste back into your Claude conversation for analysis and refined suggestions.</p>
+      <h3 style="margin-top: 16px;">Review Prompt for AI</h3>
+      <p class="small">Copy and paste back into your AI conversation for analysis and refined suggestions.</p>
       <textarea id="cw-review-prompt" readonly style="min-height: 250px; font-family: monospace; font-size: 12px;"></textarea>
       <button type="button" onclick="copyField('cw-review-prompt')" class="btn-sm" style="margin-top: 8px;">Copy Review Prompt</button>
 
@@ -724,7 +724,7 @@
       return;
     }
 
-    msg.textContent = `Prompt generated (${data.candle_count} candles available). Copy it and paste into a Claude conversation.`;
+    msg.textContent = `Prompt generated (${data.candle_count} candles available). Copy it and paste into an AI conversation.`;
     document.getElementById("cw-prompt").value = data.prompt;
     document.getElementById("cw-prompt-area").classList.remove("hidden");
     document.getElementById("cw-step2").classList.remove("hidden");
@@ -735,7 +735,7 @@
     const claudeResponse = document.getElementById("cw-claude-response").value.trim();
 
     if (!claudeResponse) {
-      msg.textContent = "Please paste Claude's response first.";
+      msg.textContent = "Please paste the model response first.";
       return;
     }
 
@@ -823,7 +823,7 @@
   function startNextIteration() {
     // Reset step 2 for another round
     document.getElementById("cw-claude-response").value = "";
-    document.getElementById("cw-step2-msg").textContent = "Paste Claude's refined suggestions below for another iteration.";
+    document.getElementById("cw-step2-msg").textContent = "Paste the model's refined suggestions below for another iteration.";
     document.getElementById("cw-step2").scrollIntoView({ behavior: "smooth" });
   }
 

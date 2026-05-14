@@ -59,6 +59,27 @@ class ClaudeConfig(BaseModel):
         return value
 
 
+class AIConfig(BaseModel):
+    enabled: bool = False
+    provider: str = "claude"  # claude, openai_compatible, ollama
+    base_url: str = "http://127.0.0.1:11434"
+    api_key: str = ""
+    model: str = "claude-sonnet-4-6"
+    review_model: str = "claude-sonnet-4-6"
+    max_tokens: int = 2048
+    review_max_tokens: int = 4096
+    temperature: float = 0.2
+    timeout_sec: float = 120.0
+
+    @field_validator("provider", mode="after")
+    @classmethod
+    def _validate_provider(cls, value: str) -> str:
+        cleaned = (value or "claude").strip().lower()
+        if cleaned not in {"claude", "openai_compatible", "ollama"}:
+            return "claude"
+        return cleaned
+
+
 class SignalConfig(BaseModel):
     enabled: bool = False
     scan_interval_sec: int = 300
@@ -66,6 +87,7 @@ class SignalConfig(BaseModel):
     timeframes: List[str] = Field(default_factory=lambda: ["1h", "4h"])
     strategies: List[str] = Field(default_factory=list)
     require_claude_confirmation: bool = True
+    require_model_review: bool = True
     min_confidence: float = 0.6
     max_signals_per_day: int = 10
     cool_down_minutes: int = 60
@@ -83,10 +105,16 @@ class ExecutionConfig(BaseModel):
     paused: bool = False  # manual pause — blocks all new trades
 
     # Prop firm risk management
-    risk_per_trade_pct: float = 1.0  # % of balance risked per trade (1% = safe for 4% daily limit)
+    risk_per_trade_pct: float = 0.5  # % of balance risked per trade before drawdown scaling
+    min_risk_per_trade_pct: float = 0.25
     max_open_positions: int = 3  # total across all pairs (1 per pair)
-    max_daily_loss_pct: float = 4.0  # prop firm daily drawdown limit
-    max_total_loss_pct: float = 8.0  # prop firm max account drawdown
+    max_daily_loss_pct: float = 2.0
+    max_total_loss_pct: float = 7.0
+    account_start_balance: float = 0.0
+    max_relative_drawdown_pct: float = 7.0
+    drawdown_hard_stop_buffer_pct: float = 0.25
+    risk_reduction_drawdown_pct: float = 4.0
+    max_aggregate_open_risk_pct: float = 2.0
 
     # Position sizing (used by trade manager when rules don't specify SL/TP)
     default_lot_type: str = "mini"
@@ -102,6 +130,8 @@ class TrainingConfig(BaseModel):
     initial_balance: float = 10000.0
     use_claude_evaluation: bool = True
     use_claude_signals: bool = False
+    use_model_evaluation: bool = True
+    use_model_signals: bool = False
     rank_by: str = "sharpe_ratio"
     auto_deploy_threshold: float = 1.5
 
@@ -132,6 +162,7 @@ class AppConfig(BaseModel):
     )
     account_poll_interval_sec: float = 5.0
     claude: ClaudeConfig = Field(default_factory=ClaudeConfig)
+    ai: AIConfig = Field(default_factory=AIConfig)
     signals: SignalConfig = Field(default_factory=SignalConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
@@ -204,6 +235,7 @@ def load_config() -> AppConfig:
 
     data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     cfg = AppConfig.model_validate(data)
+    _migrate_legacy_config(cfg, data)
     if not cfg.server_id:
         cfg.server_id = str(uuid.uuid4())
         save_config(cfg)
@@ -216,3 +248,35 @@ def save_config(cfg: AppConfig) -> None:
         json.dumps(cfg.model_dump(), indent=2),
         encoding="utf-8",
     )
+
+
+def _migrate_legacy_config(cfg: AppConfig, raw_data: dict) -> None:
+    """Bridge old Claude-specific config to the provider-neutral AI config."""
+    changed = False
+
+    if "ai" not in raw_data:
+        cfg.ai.enabled = cfg.claude.enabled
+        cfg.ai.provider = "claude"
+        cfg.ai.api_key = cfg.claude.api_key
+        cfg.ai.model = cfg.claude.model
+        cfg.ai.review_model = cfg.claude.review_model
+        cfg.ai.max_tokens = cfg.claude.max_tokens
+        cfg.ai.review_max_tokens = cfg.claude.review_max_tokens
+        cfg.ai.temperature = cfg.claude.temperature
+        changed = True
+
+    signals_raw = raw_data.get("signals", {})
+    if "require_model_review" not in signals_raw:
+        cfg.signals.require_model_review = cfg.signals.require_claude_confirmation
+        changed = True
+
+    training_raw = raw_data.get("training", {})
+    if "use_model_evaluation" not in training_raw:
+        cfg.training.use_model_evaluation = cfg.training.use_claude_evaluation
+        changed = True
+    if "use_model_signals" not in training_raw:
+        cfg.training.use_model_signals = cfg.training.use_claude_signals
+        changed = True
+
+    if changed:
+        save_config(cfg)

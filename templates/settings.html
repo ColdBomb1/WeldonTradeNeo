@@ -101,27 +101,45 @@
       </label>
     </div>
 
-    <h2>Claude API</h2>
+    <h2>AI Provider</h2>
     <label>
-      API Key
-      <input type="password" name="claude_api_key" value="{{ config.claude.api_key }}" placeholder="sk-ant-..." />
+      Provider
+      <select name="ai_provider">
+        <option value="claude" {% if config.ai.provider == 'claude' %}selected{% endif %}>Claude API</option>
+        <option value="ollama" {% if config.ai.provider == 'ollama' %}selected{% endif %}>Ollama</option>
+        <option value="openai_compatible" {% if config.ai.provider == 'openai_compatible' %}selected{% endif %}>OpenAI-compatible</option>
+      </select>
     </label>
     <div class="row">
       <label>
+        Base URL
+        <input name="ai_base_url" value="{{ config.ai.base_url }}" placeholder="http://127.0.0.1:11434" />
+      </label>
+      <label>
+        API Key (optional for local)
+        <input type="password" name="ai_api_key" value="{{ config.ai.api_key }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
         Signal Model
-        <input name="claude_model" value="{{ config.claude.model }}" />
+        <input name="ai_model" value="{{ config.ai.model }}" />
       </label>
       <label>
         Review / Evolve Model
-        <input name="claude_review_model" value="{{ config.claude.review_model }}" />
+        <input name="ai_review_model" value="{{ config.ai.review_model }}" />
       </label>
       <label>
         Temperature (0.0-1.0)
-        <input type="number" min="0" max="1" step="0.1" name="claude_temperature" value="{{ config.claude.temperature }}" />
+        <input type="number" min="0" max="1" step="0.1" name="ai_temperature" value="{{ config.ai.temperature }}" />
       </label>
       <label>
-        <input type="checkbox" name="claude_enabled" style="width: auto;" {% if config.claude.enabled %}checked{% endif %} />
-        Enable Claude API
+        Timeout (seconds)
+        <input type="number" min="5" max="600" step="5" name="ai_timeout_sec" value="{{ config.ai.timeout_sec }}" />
+      </label>
+      <label>
+        <input type="checkbox" name="ai_enabled" style="width: auto;" {% if config.ai.enabled %}checked{% endif %} />
+        Enable AI review
       </label>
     </div>
 
@@ -149,15 +167,15 @@
     <div class="row">
       <label>
         Max Signals Per Day
-        <input type="number" min="1" max="100" name="signals_max_per_day" value="{{ config.signals.max_signals_per_day }}" />
+        <input type="number" min="0" max="100" name="signals_max_per_day" value="{{ config.signals.max_signals_per_day }}" />
       </label>
       <label>
         Cooldown (minutes)
         <input type="number" min="5" max="1440" name="signals_cool_down_minutes" value="{{ config.signals.cool_down_minutes }}" />
       </label>
       <label>
-        <input type="checkbox" name="signals_require_claude" style="width: auto;" {% if config.signals.require_claude_confirmation %}checked{% endif %} />
-        Require Claude confirmation
+        <input type="checkbox" name="signals_require_model" style="width: auto;" {% if config.signals.require_model_review %}checked{% endif %} />
+        Require AI review
       </label>
     </div>
 
@@ -179,7 +197,7 @@
       </label>
       <label>
         <input type="checkbox" name="news_sentiment_enabled" style="width: auto;" {% if config.news.sentiment_enabled %}checked{% endif %} />
-        Enable Claude sentiment analysis
+        Enable AI sentiment analysis
       </label>
     </div>
 
@@ -192,17 +210,47 @@
         <span class="small">1% recommended — 3 simultaneous losses = 3% (under daily limit)</span>
       </label>
       <label>
+        Min Risk Per Trade (%)
+        <input type="number" min="0" max="5" step="0.05" name="execution_min_risk_pct" value="{{ config.execution.min_risk_per_trade_pct }}" />
+        <span class="small">Floor used after drawdown-based reduction</span>
+      </label>
+      <label>
         Max Daily Loss (%)
-        <input type="number" min="1" max="10" step="0.5" name="execution_max_daily_loss" value="{{ config.execution.max_daily_loss_pct }}" />
+        <input type="number" min="0.1" max="10" step="0.1" name="execution_max_daily_loss" value="{{ config.execution.max_daily_loss_pct }}" />
         <span class="small">Prop firm daily drawdown limit (includes unrealized P&L)</span>
       </label>
       <label>
         Max Total Loss (%)
-        <input type="number" min="1" max="20" step="0.5" name="execution_max_total_loss" value="{{ config.execution.max_total_loss_pct }}" />
+        <input type="number" min="0.1" max="20" step="0.1" name="execution_max_total_loss" value="{{ config.execution.max_total_loss_pct }}" />
         <span class="small">Prop firm max account drawdown — stops ALL trading if breached</span>
       </label>
     </div>
     <div class="row">
+      <label>
+        Account Start Balance
+        <input type="number" min="0" step="100" name="execution_account_start_balance" value="{{ config.execution.account_start_balance }}" />
+        <span class="small">0 uses account snapshot history</span>
+      </label>
+      <label>
+        Max Relative Drawdown (%)
+        <input type="number" min="0.1" max="20" step="0.1" name="execution_max_relative_drawdown" value="{{ config.execution.max_relative_drawdown_pct }}" />
+        <span class="small">Hard account-level target limit</span>
+      </label>
+      <label>
+        Hard Stop Buffer (%)
+        <input type="number" min="0" max="5" step="0.05" name="execution_drawdown_buffer" value="{{ config.execution.drawdown_hard_stop_buffer_pct }}" />
+      </label>
+    </div>
+    <div class="row">
+      <label>
+        Start Reducing Risk At Drawdown (%)
+        <input type="number" min="0" max="20" step="0.1" name="execution_risk_reduction_drawdown" value="{{ config.execution.risk_reduction_drawdown_pct }}" />
+      </label>
+      <label>
+        Max Aggregate Open Risk (%)
+        <input type="number" min="0" max="10" step="0.1" name="execution_max_aggregate_risk" value="{{ config.execution.max_aggregate_open_risk_pct }}" />
+        <span class="small">Open stop-loss risk plus candidate risk</span>
+      </label>
       <label>
         Max Open Positions
         <input type="number" min="1" max="10" name="execution_max_positions" value="{{ config.execution.max_open_positions }}" />

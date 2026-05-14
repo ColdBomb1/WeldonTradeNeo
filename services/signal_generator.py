@@ -1,7 +1,7 @@
 """Autonomous signal generation loop.
 
 Scans configured symbols/timeframes using registered strategies,
-optionally validates signals with Claude, and dispatches confirmed
+optionally validates signals with the configured AI provider, and dispatches confirmed
 signals to the trade manager for execution.
 """
 
@@ -16,13 +16,13 @@ from db import get_session
 from models.candle import Candle
 from models.signal import Signal as SignalModel
 from services.strategy_service import STRATEGIES, SignalType
-from services import indicator_service, claude_service, trade_manager, news_service, sentiment_service, rule_engine
+from services import ai_service, indicator_service, trade_manager, news_service, sentiment_service, rule_engine
 
 logger = logging.getLogger(__name__)
 
 
 # Per (scan_key, timeframe, symbol) latest bar timestamp we've already scanned.
-# Used so a 15m ruleset checked every 5min only burns one Claude call per bar
+# Used so a 15m ruleset checked every 5min only burns one AI call per bar
 # (i.e. once every 15min) instead of three. Resets on process restart, which is
 # fine — at worst the first scan after a restart re-scores a bar already seen
 # by the previous instance.
@@ -54,7 +54,7 @@ def _current_bar_key(timeframe: str, now: datetime) -> str:
 def _claim_new_bar(scan_key: str, timeframe: str, symbol: str, bar_ts: str) -> bool:
     """Return True the first time we see (scan_key, tf, symbol, bar_ts), False
     after that. Marks the bar as claimed before the caller spends any work on
-    it — if the downstream Claude call fails, the bar isn't retried until the
+    it - if the downstream AI call fails, the bar isn't retried until the
     next bar closes (acceptable, prevents retry storms during API outages)."""
     key = (scan_key, timeframe, symbol)
     if _last_scanned_bar.get(key) == bar_ts:
@@ -142,7 +142,7 @@ def _check_candle_freshness(candles: list[dict], timeframe: str) -> bool:
 
 
 def _compute_indicator_context(candles: list[dict]) -> dict:
-    """Compute current indicator values for Claude context."""
+    """Compute current indicator values for AI context."""
     closes = [c["close"] for c in candles]
     result = {}
 
@@ -273,20 +273,20 @@ def _scan_once():
                         tp_dist = atr_val * cfg.execution.tp_atr_multiplier
                         tp = signal.price + tp_dist if side == "buy" else signal.price - tp_dist
 
-                # Claude confirmation
-                claude_analysis = None
+                # Optional AI confirmation
+                model_analysis = None
                 confidence = None
                 status = "confirmed"
                 reject_reason = ""
 
-                if sig_cfg.require_claude_confirmation and cfg.claude.enabled:
+                if sig_cfg.require_model_review and ai_service.is_enabled(cfg):
                     indicators = _compute_indicator_context(candles)
 
-                    # Gather news and sentiment context for Claude
+                    # Gather news and sentiment context for AI review
                     upcoming_events = news_service.get_events_for_symbol(symbol, hours_ahead=4) if cfg.news.enabled else []
                     sentiment = sentiment_service.get_current_sentiment(symbol)
 
-                    analysis = claude_service.analyze_trade_signal(
+                    analysis = ai_service.analyze_trade_signal(
                         symbol=symbol,
                         timeframe=timeframe,
                         strategy_name=strategy_name,
@@ -300,19 +300,19 @@ def _scan_once():
                         upcoming_events=upcoming_events,
                         sentiment=sentiment,
                     )
-                    claude_analysis = analysis
+                    model_analysis = analysis
                     confidence = analysis.get("confidence", 0.0)
 
                     rec = analysis.get("recommendation", "skip")
                     if rec == "skip":
                         status = "rejected"
-                        reject_reason = "Claude: skip"
+                        reject_reason = "AI: skip"
                     elif confidence < sig_cfg.min_confidence:
                         status = "rejected"
                         reject_reason = f"Low confidence ({confidence:.0%} < {sig_cfg.min_confidence:.0%})"
                     else:
                         status = "confirmed"
-                        # Apply Claude's adjusted SL/TP if provided
+                        # Apply the model's adjusted SL/TP if provided
                         if analysis.get("adjusted_sl") is not None:
                             sl = analysis["adjusted_sl"]
                         if analysis.get("adjusted_tp") is not None:
@@ -331,7 +331,7 @@ def _scan_once():
                         take_profit=tp,
                         confidence=confidence,
                         reason=signal.reason,
-                        claude_analysis={**(claude_analysis or {}), "reject_reason": reject_reason} if reject_reason else claude_analysis,
+                        claude_analysis={**(model_analysis or {}), "reject_reason": reject_reason} if reject_reason else model_analysis,
                         status=status,
                         created_at=now,
                         resolved_at=now if status == "rejected" else None,
@@ -360,11 +360,11 @@ def _scan_once():
 
 
 def _scan_rulesets():
-    """Scan active rulesets using Claude rule evaluation."""
+    """Scan active rulesets using configured AI rule evaluation."""
     cfg = load_config()
     sig_cfg = cfg.signals
 
-    if not cfg.claude.enabled:
+    if not ai_service.is_enabled(cfg):
         return
 
     # Trading session window check (EST/EDT)
@@ -401,7 +401,7 @@ def _scan_rulesets():
                 if c and len(c) >= 50:
                     all_candles[sym] = c
 
-            # Fetch higher-timeframe context (1h, 4h) per symbol so Claude can
+            # Fetch higher-timeframe context (1h, 4h) per symbol so the model can
             # form directional bias from the broader picture before scoring the
             # entry-timeframe trigger. Skip redundant fetch if primary TF already
             # matches a higher TF.
@@ -418,7 +418,7 @@ def _scan_rulesets():
 
             # Per-tick counters — the summary log at the end of this (ruleset,
             # timeframe) iteration shows exactly how many symbols actually got
-            # a Claude call vs were gated out. If evaluated=0 across ticks
+            # an AI call vs were gated out. If evaluated=0 across ticks
             # until a new bar closes, the bar-close gate is doing its job.
             evaluated = 0
             skipped_same_bar = 0
@@ -437,7 +437,7 @@ def _scan_rulesets():
 
                 # Bar-close gating: skip if we've already scanned this bar
                 # for this ruleset. Keeps a 15m ruleset on a 5min scan_interval
-                # firing Claude once per bar instead of three.
+                # firing the model once per bar instead of three.
                 latest_bar_ts = _current_bar_key(timeframe, datetime.now(timezone.utc))
                 if not _claim_new_bar(f"ruleset:{rs_id}", timeframe, symbol, latest_bar_ts):
                     skipped_same_bar += 1
@@ -454,7 +454,7 @@ def _scan_rulesets():
                     skipped_news += 1
                     continue
 
-                # Evaluate rules with Claude (including cross-pair context)
+                # Evaluate rules with the configured AI provider (including cross-pair context)
                 indicators = rule_engine._compute_indicators(candles)
                 if len(all_candles) > 1:
                     cross_ctx = rule_engine.compute_cross_pair_context(symbol, all_candles)
@@ -476,7 +476,7 @@ def _scan_rulesets():
                 confidence = result.get("confidence", 0)
 
                 # Visibility: log EVERY scan outcome, not just the ones that pass.
-                # This is the only way to see whether Claude is scoring near-misses
+                # This is the only way to see whether the model is scoring near-misses
                 # vs seeing nothing at all.
                 if signal_type not in ("BUY", "SELL"):
                     logger.info(
@@ -510,7 +510,7 @@ def _scan_rulesets():
                         tp_dist = atr_val * cfg.execution.tp_atr_multiplier
                         tp = price + tp_dist if side == "buy" else price - tp_dist
 
-                # R:R guardrail. Claude's SL/TP placements have run sub-1.5 R:R
+                # R:R guardrail. Model SL/TP placements have run sub-1.5 R:R
                 # often enough to bleed real money (EURUSD SELL: 15/25 trades had
                 # TP closer than SL). The ATR fallback above also defaults to a
                 # 0.8 R:R (sl_atr=2.5, tp_atr=2.0). With ~50% live win rate,
@@ -564,7 +564,7 @@ def _scan_rulesets():
                     logger.error("Trade execution error for signal %d: %s", signal_id, exc)
 
             logger.info(
-                "Ruleset '%s' on %s done: evaluated=%d (claude calls), "
+                "Ruleset '%s' on %s done: evaluated=%d (AI calls), "
                 "skipped_same_bar=%d, skipped_cooldown=%d, skipped_news=%d",
                 rs_name, timeframe, evaluated,
                 skipped_same_bar, skipped_cooldown, skipped_news,

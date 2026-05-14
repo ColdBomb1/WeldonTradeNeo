@@ -10,7 +10,7 @@
 {% block content %}
 <header>
   <h1>Automated Training</h1>
-  <p>Replay historical data, iterate with Claude feedback, and deploy optimized parameters.</p>
+  <p>Replay historical data, iterate with AI feedback, and deploy optimized parameters.</p>
 </header>
 <main>
   <section class="card">
@@ -112,7 +112,7 @@
       <tbody></tbody>
     </table>
 
-    <h3>Claude Feedback</h3>
+    <h3>AI Feedback</h3>
     <div id="claude-feedback" style="white-space:pre-wrap;font-size:13px;max-height:400px;overflow-y:auto"></div>
   </section>
 </main>
@@ -263,7 +263,7 @@
       });
     }
 
-    // Claude feedback
+    // AI feedback
     const feedbackEl = document.getElementById('claude-feedback');
     let feedbackText = '';
     iters.forEach(it => {
@@ -281,10 +281,10 @@
       if (it.claude_analysis && typeof it.claude_analysis === 'object') {
         const a = it.claude_analysis;
         if (a.error) {
-          feedbackText += `Claude: ${a.error}\n`;
+          feedbackText += `AI: ${a.error}\n`;
         } else {
-          if (a.reasoning) feedbackText += `\nClaude reasoning: ${a.reasoning}\n`;
-          if (a.confidence != null) feedbackText += `Claude confidence: ${(a.confidence * 100).toFixed(0)}%\n`;
+          if (a.reasoning) feedbackText += `\nAI reasoning: ${a.reasoning}\n`;
+          if (a.confidence != null) feedbackText += `AI confidence: ${(a.confidence * 100).toFixed(0)}%\n`;
           if (a.data_feedback) {
             if (a.data_feedback.useful && a.data_feedback.useful.length)
               feedbackText += `Useful data: ${a.data_feedback.useful.join(', ')}\n`;
@@ -298,7 +298,7 @@
           }
         }
       } else {
-        feedbackText += `(No Claude analysis — heuristic adjustments used)\n`;
+        feedbackText += `(No AI analysis - heuristic adjustments used)\n`;
       }
 
       if (it.suggested_params) {
