@@ -147,7 +147,7 @@
   function signed(value, digits = 2) {
     if (value == null || isNaN(Number(value))) return '--';
     const n = Number(value);
-    const color = n >= 0 ? '#1b5b41' : '#8f2d2d';
+    const color = n >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="color:${color};font-weight:600">${n >= 0 ? '+' : ''}${n.toFixed(digits)}</span>`;
   }
   function badge(text, kind = 'neutral') {
@@ -287,7 +287,7 @@
       renderSentiment(data.sentiment || []);
       msg.textContent = '';
     } catch (e) {
-      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
     }
   }
 
@@ -301,7 +301,7 @@
       msg.textContent = data.status || 'Calendar refreshed.';
       loadSummary();
     } catch (e) {
-      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
     }
   });
   document.getElementById('cot-btn').addEventListener('click', async () => {
@@ -312,7 +312,7 @@
       msg.textContent = `COT sync complete. Stored ${data.stored || 0} new rows.`;
       loadSummary();
     } catch (e) {
-      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
     }
   });
 

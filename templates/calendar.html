@@ -82,15 +82,15 @@
 {% block scripts %}
 <script>
   function impactBadge(impact) {
-    const colors = { high: '#e74c3c', medium: '#e67e22', low: '#888' };
-    const color = colors[impact] || '#888';
-    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#fff;font-size:12px">${impact}</span>`;
+    const colors = { high: '#ff6475', medium: '#f6b94c', low: '#8da1b3' };
+    const color = colors[impact] || '#8da1b3';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#041016;font-size:12px;font-weight:700">${impact}</span>`;
   }
 
   function sentimentLabel(score) {
-    if (score > 0.2) return `<span style="color:#27ae60;font-weight:600">Bullish (${score.toFixed(2)})</span>`;
-    if (score < -0.2) return `<span style="color:#e74c3c;font-weight:600">Bearish (${score.toFixed(2)})</span>`;
-    return `<span style="color:#888;font-weight:600">Neutral (${score.toFixed(2)})</span>`;
+    if (score > 0.2) return `<span style="color:#35d48b;font-weight:600">Bullish (${score.toFixed(2)})</span>`;
+    if (score < -0.2) return `<span style="color:#ff6475;font-weight:600">Bearish (${score.toFixed(2)})</span>`;
+    return `<span style="color:#8da1b3;font-weight:600">Neutral (${score.toFixed(2)})</span>`;
   }
 
   async function loadWeekEvents() {
@@ -139,13 +139,13 @@
         const data = await resp.json();
         const el = document.getElementById(`status-${symbol}`);
         if (data.blocked) {
-          el.innerHTML = `<span style="color:#e74c3c;font-weight:600">BLOCKED</span>`;
+          el.innerHTML = `<span style="color:#ff6475;font-weight:600">BLOCKED</span>`;
           el.title = data.reason;
         } else if (data.upcoming_events && data.upcoming_events.length > 0) {
           const next = data.upcoming_events[0];
-          el.innerHTML = `<span style="color:#e67e22">${next.minutes_until}m → ${next.title}</span>`;
+          el.innerHTML = `<span style="color:#f6b94c">${next.minutes_until}m -> ${next.title}</span>`;
         } else {
-          el.innerHTML = `<span style="color:#27ae60">Clear</span>`;
+          el.innerHTML = `<span style="color:#35d48b">Clear</span>`;
         }
       } catch (err) {
         document.getElementById(`status-${symbol}`).textContent = 'Error';

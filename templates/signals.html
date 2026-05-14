@@ -35,7 +35,7 @@
       <div class="button-wrap">
         <button type="button" id="refresh-btn">Refresh</button>
         <button type="button" id="scan-now-btn">Scan Now</button>
-        <button type="button" id="clear-btn" style="background:#888">Clear Old</button>
+        <button type="button" id="clear-btn" style="background:#8da1b3;color:#041016">Clear Old</button>
       </div>
     </div>
   </section>
@@ -68,7 +68,7 @@
     <h2 id="detail-title">Signal Detail</h2>
     <div class="status-grid" id="detail-grid"></div>
     <h3>AI Reasoning</h3>
-    <div id="detail-reasoning" style="white-space:pre-wrap;font-size:13px;background:#f5f0e6;padding:12px;border-radius:6px;max-height:300px;overflow-y:auto"></div>
+    <div id="detail-reasoning" style="white-space:pre-wrap;font-size:13px;background:#0f171f;border:1px solid #22313d;padding:12px;border-radius:6px;max-height:300px;overflow-y:auto"></div>
   </section>
 </main>
 {% endblock %}
@@ -76,28 +76,28 @@
 {% block scripts %}
 <script>
   function statusBadge(status) {
-    const colors = { pending: '#e67e22', confirmed: '#27ae60', rejected: '#e74c3c', executed: '#1f4b57', expired: '#888' };
-    const color = colors[status] || '#888';
-    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#fff;font-size:12px">${status}</span>`;
+    const colors = { pending: '#f6b94c', confirmed: '#35d48b', rejected: '#ff6475', executed: '#29c8ff', expired: '#8da1b3' };
+    const color = colors[status] || '#8da1b3';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${color};color:#041016;font-size:12px;font-weight:700">${status}</span>`;
   }
 
   function sideBadge(side) {
-    const color = side === 'buy' ? '#27ae60' : '#e74c3c';
+    const color = side === 'buy' ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${color}">${side.toUpperCase()}</span>`;
   }
 
   function confBadge(conf) {
     if (conf == null) return '--';
     const pct = (conf * 100).toFixed(0);
-    const color = conf >= 0.7 ? '#27ae60' : conf >= 0.55 ? '#e67e22' : '#e74c3c';
+    const color = conf >= 0.7 ? '#35d48b' : conf >= 0.55 ? '#f6b94c' : '#ff6475';
     return `<span style="font-weight:600;color:${color}">${pct}%</span>`;
   }
 
   function sourceName(strategy_type) {
     if (strategy_type && strategy_type.startsWith('ruleset_')) {
-      return `<span style="color:#1f4b57;font-weight:600">Rule Set</span>`;
+      return `<span style="color:#29c8ff;font-weight:600">Rule Set</span>`;
     }
-    return `<span style="color:#888">${strategy_type || '?'}</span>`;
+    return `<span style="color:#8da1b3">${strategy_type || '?'}</span>`;
   }
 
   async function loadSignals() {

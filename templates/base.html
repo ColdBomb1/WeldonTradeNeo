@@ -29,6 +29,13 @@
     <div class="content">
       {% block content %}{% endblock %}
     </div>
+    <script>
+      if (window.Chart) {
+        Chart.defaults.color = '#8da1b3';
+        Chart.defaults.borderColor = '#22313d';
+        Chart.defaults.font.family = '"IBM Plex Sans", "Segoe UI", sans-serif';
+      }
+    </script>
     {% block scripts %}{% endblock %}
   </body>
 </html>

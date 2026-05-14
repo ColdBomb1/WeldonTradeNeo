@@ -102,8 +102,8 @@
         datasets: [{
           label: "Bid",
           data: points.map(p => p.bid),
-          borderColor: "#1f4b57",
-          backgroundColor: "rgba(31,75,87,0.1)",
+          borderColor: "#29c8ff",
+          backgroundColor: "rgba(41,200,255,0.14)",
           tension: 0.2,
           pointRadius: 0,
           fill: true,
@@ -121,8 +121,8 @@
       data: {
         labels: points.map(p => p.time),
         datasets: [
-          { label: "Balance", data: points.map(p => p.balance), borderColor: "#6a4f2a", backgroundColor: "rgba(106,79,42,0.08)", tension: 0.2, pointRadius: 0 },
-          { label: "Equity", data: points.map(p => p.equity), borderColor: "#2a6a4f", backgroundColor: "rgba(42,106,79,0.08)", tension: 0.2, pointRadius: 0 },
+          { label: "Balance", data: points.map(p => p.balance), borderColor: "#29c8ff", backgroundColor: "rgba(41,200,255,0.12)", tension: 0.2, pointRadius: 0 },
+          { label: "Equity", data: points.map(p => p.equity), borderColor: "#35d48b", backgroundColor: "rgba(53,212,139,0.12)", tension: 0.2, pointRadius: 0 },
         ],
       },
       options: { responsive: true, maintainAspectRatio: false, scales: { x: { display: false } } },

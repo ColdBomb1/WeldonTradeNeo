@@ -102,7 +102,7 @@
   <section class="card" id="detail-section" style="display:none">
     <h2 style="display:flex;align-items:center;gap:8px">
       <input id="detail-name" value="" style="font:inherit;border:1px solid transparent;background:transparent;padding:2px 6px;border-radius:4px;flex:1;min-width:0" />
-      <span id="detail-id" style="font-size:14px;color:#888;white-space:nowrap"></span>
+      <span id="detail-id" style="font-size:14px;color:#8da1b3;white-space:nowrap"></span>
     </h2>
 
     <div class="row" style="margin-bottom:8px">
@@ -234,24 +234,24 @@
 
   function statusBadge(status) {
     const colors = {
-      active: '#27ae60',
-      inactive: '#888',
-      training: '#e67e22',
-      candidate: '#2980b9',
-      validated: '#16a085',
+      active: '#35d48b',
+      inactive: '#8da1b3',
+      training: '#f6b94c',
+      candidate: '#29c8ff',
+      validated: '#20d0b2',
     };
-    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#888'};color:#fff;font-size:12px">${status}</span>`;
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#8da1b3'};color:#041016;font-size:12px;font-weight:700">${status}</span>`;
   }
 
   function pnlSpan(v) {
     if (v == null) return '--';
-    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    const c = v >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
   }
 
   function fmtReturnPct(v) {
     if (v == null) return '--';
-    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    const c = v >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${c}">${v.toFixed(2)}%</span>`;
   }
 
@@ -320,7 +320,7 @@
       return;
     }
     const passed = validation.passed === true || validation.status === 'passed';
-    const color = passed ? '#27ae60' : (validation.status === 'stale' ? '#e67e22' : '#e74c3c');
+    const color = passed ? '#35d48b' : (validation.status === 'stale' ? '#f6b94c' : '#ff6475');
     const reasons = validation.reasons && validation.reasons.length
       ? ` ${validation.reasons.join(' ')}`
       : '';
@@ -504,7 +504,7 @@
         labels: curve.map(p => p.time ? new Date(p.time).toLocaleDateString() : ''),
         datasets: [{
           label: 'Equity', data: curve.map(p => p.equity),
-          borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)',
+          borderColor: '#29c8ff', backgroundColor: 'rgba(41,200,255,0.14)',
           tension: 0.2, pointRadius: 0, fill: true,
         }]
       },
@@ -536,7 +536,7 @@
         document.getElementById('backtest-btn').textContent = 'Run Backtest';
         document.getElementById('validate-btn').textContent = 'Run Validation';
         document.getElementById('bt-results').innerHTML =
-          `<span style="color:#e74c3c">Backtest ${p.status}${p.error ? ': ' + p.error : ''}</span>`;
+          `<span style="color:#ff6475">Backtest ${p.status}${p.error ? ': ' + p.error : ''}</span>`;
         loadRulesets();
         return;
       }
@@ -562,7 +562,7 @@
               ? `<br>${r.validation_reasons.join(' ')}`
               : '';
             document.getElementById('bt-results').innerHTML =
-              `<strong style="color:${ok ? '#27ae60' : '#e74c3c'}">Validation ${r.validation_status}:</strong> ${base}${reasons}`;
+              `<strong style="color:${ok ? '#35d48b' : '#ff6475'}">Validation ${r.validation_status}:</strong> ${base}${reasons}`;
           } else {
             document.getElementById('bt-results').innerHTML = `<strong>Final:</strong> ${base}`;
           }
@@ -605,7 +605,7 @@
       validateBtn.disabled = false;
       backtestBtn.textContent = 'Run Backtest';
       validateBtn.textContent = 'Run Validation';
-      document.getElementById('bt-results').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      document.getElementById('bt-results').innerHTML = `<span style="color:#ff6475">${data.error}</span>`;
       return;
     }
     activeBtId = data.bt_id;
@@ -633,9 +633,9 @@
         labels: iterations.map(it => `#${it.iteration_number}`),
         datasets: [
           { label: 'Sharpe', data: iterations.map(it => it.sharpe_ratio),
-            borderColor: '#1f4b57', tension: 0.2, yAxisID: 'y' },
+            borderColor: '#29c8ff', tension: 0.2, yAxisID: 'y' },
           { label: 'Win Rate %', data: iterations.map(it => it.win_rate != null ? it.win_rate*100 : null),
-            borderColor: '#27ae60', tension: 0.2, yAxisID: 'y1' },
+            borderColor: '#35d48b', tension: 0.2, yAxisID: 'y1' },
         ]
       },
       options: { responsive: true, maintainAspectRatio: false, animation: false,
@@ -647,7 +647,7 @@
     });
   }
 
-  const symColors = ['#1f4b57', '#27ae60', '#e67e22', '#8e44ad', '#e74c3c', '#2980b9'];
+  const symColors = ['#29c8ff', '#35d48b', '#f6b94c', '#20d0b2', '#ff6475', '#6fe0ff'];
 
   function updateTrEquity(perSymbolCurves, initialBalance) {
     const ctx = document.getElementById('tr-equity-chart').getContext('2d');
@@ -678,7 +678,7 @@
     // Starting balance reference line
     datasets.push({
       label: 'Starting', data: labels.map(() => startBal),
-      borderColor: '#888', borderWidth: 1, borderDash: [4,2],
+      borderColor: '#8da1b3', borderWidth: 1, borderDash: [4,2],
       pointRadius: 0, fill: false,
     });
 
@@ -714,12 +714,12 @@
       const ddTarget = p.target_dd_pct;
       const ddOk = dd != null && ddTarget && dd <= ddTarget / 100;
       document.getElementById('tp-dd').innerHTML = dd != null
-        ? `<span style="color:${ddOk ? '#27ae60' : '#e74c3c'}">${ddPct}</span>` : '--';
+        ? `<span style="color:${ddOk ? '#35d48b' : '#ff6475'}">${ddPct}</span>` : '--';
       const profitPct = bal != null ? ((bal - startBal) / startBal * 100) : null;
       const profitTarget = p.target_profit_pct;
       const profitOk = profitPct != null && profitTarget && profitPct >= profitTarget;
       document.getElementById('tp-profit').innerHTML = profitPct != null
-        ? `<span style="color:${profitOk ? '#27ae60' : '#e74c3c'}">${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(1)}%</span>` : '--';
+        ? `<span style="color:${profitOk ? '#35d48b' : '#ff6475'}">${profitPct >= 0 ? '+' : ''}${profitPct.toFixed(1)}%</span>` : '--';
 
       if (iters.length > 0) updateTrChart(iters);
       if (p.per_symbol_curves) updateTrEquity(p.per_symbol_curves, startBal);
@@ -748,11 +748,11 @@
         if (p.status === 'completed') {
           const candidateId = p.candidate_ruleset_id;
           document.getElementById('train-status').innerHTML = candidateId
-            ? `<span style="color:#27ae60">Training complete. Candidate ruleset #${candidateId} created. <a href="#" onclick="showDetail(${candidateId});return false">Open candidate</a> and run validation before promotion.</span>`
-            : `<span style="color:#27ae60">Training complete. No candidate was created.</span>`;
+            ? `<span style="color:#35d48b">Training complete. Candidate ruleset #${candidateId} created. <a href="#" onclick="showDetail(${candidateId});return false">Open candidate</a> and run validation before promotion.</span>`
+            : `<span style="color:#35d48b">Training complete. No candidate was created.</span>`;
           if (candidateId) showDetail(candidateId);
         } else {
-          document.getElementById('train-status').innerHTML = '<span style="color:#e67e22">Training stopped. No candidate was promoted.</span>';
+          document.getElementById('train-status').innerHTML = '<span style="color:#f6b94c">Training stopped. No candidate was promoted.</span>';
         }
         loadRulesets();
       }
@@ -782,7 +782,7 @@
     const data = await resp.json();
     if (data.error) {
       btn.disabled = false; btn.textContent = 'Start Training';
-      document.getElementById('train-status').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      document.getElementById('train-status').innerHTML = `<span style="color:#ff6475">${data.error}</span>`;
       return;
     }
     activeRunId = data.run_id;
@@ -801,7 +801,7 @@
     document.getElementById('tr-stop-btn').style.display = 'none';
     document.getElementById('train-btn').disabled = false;
     document.getElementById('train-btn').textContent = 'Start Training';
-    document.getElementById('train-status').innerHTML = '<span style="color:#e67e22">Training stopped.</span>';
+    document.getElementById('train-status').innerHTML = '<span style="color:#f6b94c">Training stopped.</span>';
   });
 
   loadRulesets();

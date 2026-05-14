@@ -135,13 +135,13 @@
   document.getElementById('end').value = dateStr(today);
 
   function badge(status) {
-    const colors = { running: '#e67e22', completed: '#27ae60', failed: '#e74c3c', stopped: '#888', pending: '#888' };
-    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#888'};color:#fff;font-size:12px">${status}</span>`;
+    const colors = { running: '#f6b94c', completed: '#35d48b', failed: '#ff6475', stopped: '#8da1b3', pending: '#8da1b3' };
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#8da1b3'};color:#041016;font-size:12px;font-weight:700">${status}</span>`;
   }
 
   function fmtPct(v) {
     if (v == null) return '--';
-    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    const c = v >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="color:${c};font-weight:600">${v.toFixed(2)}%</span>`;
   }
 
@@ -241,7 +241,7 @@
       const row = document.createElement('tr');
       row.innerHTML = `
         <td>${c.rank}</td>
-        <td>${c.passed ? '<span style="color:#27ae60;font-weight:600">passed</span>' : '<span style="color:#e74c3c">failed</span>'}</td>
+        <td>${c.passed ? '<span style="color:#35d48b;font-weight:600">passed</span>' : '<span style="color:#ff6475">failed</span>'}</td>
         <td>${c.symbol_group || '--'}<br><span class="small">${(c.symbols||[]).join(', ')}</span></td>
         <td>${c.score?.toFixed(3) ?? '--'}</td>
         <td>${fmtMetric(tm)}</td>
@@ -335,7 +335,7 @@
     if (data.error) {
       btn.disabled = false;
       btn.textContent = 'Start Research';
-      document.getElementById('progress').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      document.getElementById('progress').innerHTML = `<span style="color:#ff6475">${data.error}</span>`;
       return;
     }
     activeRunId = data.run_id;

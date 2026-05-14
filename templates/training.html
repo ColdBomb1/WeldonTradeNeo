@@ -130,14 +130,14 @@
   document.getElementById('train-end').value = today.toISOString().slice(0, 10);
 
   function statusBadge(status) {
-    const colors = { running: '#e67e22', completed: '#27ae60', failed: '#e74c3c', pending: '#888' };
-    const c = colors[status] || '#888';
-    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${c};color:#fff;font-size:12px">${status}</span>`;
+    const colors = { running: '#f6b94c', completed: '#35d48b', failed: '#ff6475', pending: '#8da1b3' };
+    const c = colors[status] || '#8da1b3';
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${c};color:#041016;font-size:12px;font-weight:700">${status}</span>`;
   }
 
   function pnlColor(val) {
     if (val == null) return '--';
-    const c = val >= 0 ? '#27ae60' : '#e74c3c';
+    const c = val >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${c}">${val >= 0 ? '+' : ''}${(val * 100).toFixed(1)}%</span>`;
   }
 
@@ -192,7 +192,7 @@
     const reportEl = document.getElementById('detail-report');
     if (run.final_report) {
       const r = run.final_report;
-      let html = '<div style="background:#f5f0e6;padding:12px;border-radius:6px;margin-bottom:10px">';
+      let html = '<div style="background:#0f171f;border:1px solid #22313d;padding:12px;border-radius:6px;margin-bottom:10px">';
       html += `<strong>Final Report</strong><br>`;
       if (r.summary) html += `${r.summary}<br>`;
       if (r.deploy_recommendation) html += `Recommendation: <strong>${r.deploy_recommendation}</strong><br>`;
@@ -239,14 +239,14 @@
             {
               label: 'Sharpe Ratio',
               data: iters.map(it => it.sharpe_ratio),
-              borderColor: '#1f4b57',
+              borderColor: '#29c8ff',
               tension: 0.2,
               yAxisID: 'y',
             },
             {
               label: 'Win Rate',
               data: iters.map(it => it.win_rate != null ? it.win_rate * 100 : null),
-              borderColor: '#27ae60',
+              borderColor: '#35d48b',
               tension: 0.2,
               yAxisID: 'y1',
             },

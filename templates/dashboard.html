@@ -125,25 +125,25 @@
 
   function pnlColor(v) {
     if (v == null) return '--';
-    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    const c = v >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${c}">$${v.toFixed(2)}</span>`;
   }
   function sideBadge(s) {
-    return `<span style="font-weight:600;color:${s==='buy'?'#27ae60':'#e74c3c'}">${s.toUpperCase()}</span>`;
+    return `<span style="font-weight:600;color:${s==='buy'?'#35d48b':'#ff6475'}">${s.toUpperCase()}</span>`;
   }
   function statusBadge(s, reason) {
-    const colors = {confirmed:'#27ae60',executed:'#1f4b57',rejected:'#e74c3c',pending:'#e67e22'};
+    const colors = {confirmed:'#35d48b',executed:'#29c8ff',rejected:'#ff6475',pending:'#f6b94c'};
     const title = reason ? ` title="${reason.replace(/"/g, '&quot;')}"` : '';
     const label = s === 'rejected' && reason ? reason.split(':')[0].substring(0, 20) : s;
-    return `<span${title} style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[s]||'#888'};color:#fff;font-size:11px;cursor:${reason?'help':'default'}">${label}</span>`;
+    return `<span${title} style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[s]||'#8da1b3'};color:#041016;font-size:11px;font-weight:700;cursor:${reason?'help':'default'}">${label}</span>`;
   }
   function platformBadge(t) {
-    const colors = {mt5:'#1f4b57',dxtrade:'#6a5acd',paper:'#888'};
-    return `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[t]||'#888'};color:#fff;font-size:11px">${(t||'?').toUpperCase()}</span>`;
+    const colors = {mt5:'#29c8ff',dxtrade:'#29c8ff',paper:'#647789'};
+    return `<span style="display:inline-block;padding:1px 6px;border-radius:3px;background:${colors[t]||'#8da1b3'};color:#041016;font-size:11px;font-weight:700">${(t||'?').toUpperCase()}</span>`;
   }
   function confColor(c) {
     if (c == null) return '--';
-    const color = c >= 0.7 ? '#27ae60' : c >= 0.55 ? '#e67e22' : '#888';
+    const color = c >= 0.7 ? '#35d48b' : c >= 0.55 ? '#f6b94c' : '#8da1b3';
     return `<span style="color:${color};font-weight:600">${(c*100).toFixed(0)}%</span>`;
   }
 
@@ -216,8 +216,8 @@
       // Connection status (only for enabled accounts)
       if (acc.enabled !== false) {
         row.querySelector('.acct-status').innerHTML = acc.connected
-          ? '<span style="color:#27ae60;font-weight:600">Connected</span>'
-          : `<span style="color:#e74c3c">${acc.error || 'Offline'}</span>`;
+          ? '<span style="color:#35d48b;font-weight:600">Connected</span>'
+          : `<span style="color:#ff6475">${acc.error || 'Offline'}</span>`;
       }
       row.querySelector('.acct-balance').innerHTML = acc.balance > 0
         ? `<strong>$${acc.balance.toLocaleString(undefined, {minimumFractionDigits: 2})}</strong>` : '<span class="small">--</span>';
@@ -228,11 +228,11 @@
     // System status
     const mode = d.mode || 'paper';
     document.getElementById('sys-mode').innerHTML = mode === 'live'
-      ? '<span style="color:#e74c3c;font-weight:600">LIVE</span>'
-      : '<span style="color:#888;font-weight:600">Paper</span>';
+      ? '<span style="color:#ff6475;font-weight:600">LIVE</span>'
+      : '<span style="color:#8da1b3;font-weight:600">Paper</span>';
     document.getElementById('sys-paused').innerHTML = d.paused
-      ? '<span style="color:#e67e22;font-weight:600">PAUSED</span>'
-      : '<span style="color:#27ae60;font-weight:600">Active</span>';
+      ? '<span style="color:#f6b94c;font-weight:600">PAUSED</span>'
+      : '<span style="color:#35d48b;font-weight:600">Active</span>';
   }
 
   async function loadSystemInfo() {
@@ -251,8 +251,8 @@
       const hResp = await fetch('/healthz');
       const h = await hResp.json();
       document.getElementById('sys-scanning').innerHTML = h.candle_collection
-        ? '<span style="color:#27ae60">Enabled</span>'
-        : '<span style="color:#888">Disabled</span>';
+        ? '<span style="color:#35d48b">Enabled</span>'
+        : '<span style="color:#8da1b3">Disabled</span>';
     } catch(e) {}
   }
 
@@ -316,7 +316,7 @@
       const trigger = s.reason || s.strategy_type || '--';
       const rejectReason = s.reject_reason || '';
       const statusCol = s.status === 'rejected' && rejectReason
-        ? `<span style="color:#e74c3c;font-size:11px" title="${rejectReason.replace(/"/g, '&quot;')}">${rejectReason.substring(0, 30)}${rejectReason.length > 30 ? '…' : ''}</span>`
+        ? `<span style="color:#ff6475;font-size:11px" title="${rejectReason.replace(/"/g, '&quot;')}">${rejectReason.substring(0, 30)}${rejectReason.length > 30 ? '…' : ''}</span>`
         : statusBadge(s.status);
       row.innerHTML = `
         <td>${time}</td>
@@ -381,7 +381,7 @@
         datasets: [{
           label: 'Cumulative P&L',
           data: curve.map(p => p.pnl),
-          borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)',
+          borderColor: '#29c8ff', backgroundColor: 'rgba(41,200,255,0.14)',
           tension: 0.2, pointRadius: 1, fill: true,
         }]
       },
@@ -429,8 +429,8 @@
             data: {
               labels: points.map(p => new Date(p.time).toLocaleString(undefined, {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'})),
               datasets: [
-                { label: 'Balance', data: points.map(p => p.balance), borderColor: '#1f4b57', backgroundColor: 'rgba(31,75,87,0.1)', tension: 0.2, pointRadius: 0, fill: true },
-                { label: 'Equity', data: points.map(p => p.equity), borderColor: '#27ae60', borderWidth: 1, tension: 0.2, pointRadius: 0, fill: false, borderDash: [4,2] },
+                { label: 'Balance', data: points.map(p => p.balance), borderColor: '#29c8ff', backgroundColor: 'rgba(41,200,255,0.14)', tension: 0.2, pointRadius: 0, fill: true },
+                { label: 'Equity', data: points.map(p => p.equity), borderColor: '#35d48b', borderWidth: 1, tension: 0.2, pointRadius: 0, fill: false, borderDash: [4,2] },
               ]
             },
             options: { responsive: true, maintainAspectRatio: false, animation: false,

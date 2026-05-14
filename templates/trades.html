@@ -101,12 +101,12 @@
 <script>
   function pnlColor(val) {
     if (val == null) return '--';
-    const color = val >= 0 ? '#27ae60' : '#e74c3c';
+    const color = val >= 0 ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${color}">$${val.toFixed(2)}</span>`;
   }
 
   function sideBadge(side) {
-    const color = side === 'buy' ? '#27ae60' : '#e74c3c';
+    const color = side === 'buy' ? '#35d48b' : '#ff6475';
     return `<span style="font-weight:600;color:${color}">${side.toUpperCase()}</span>`;
   }
 
