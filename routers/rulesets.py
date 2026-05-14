@@ -339,8 +339,14 @@ def get_rulesets() -> JSONResponse:
 @router.post("/api/rulesets/portfolio/backtest")
 async def backtest_active_portfolio(request: Request) -> JSONResponse:
     payload = await request.json()
+    cfg = load_config()
     days = max(1, min(120, int(payload.get("days") or 14)))
-    initial_balance = float(payload.get("initial_balance") or load_config().training.initial_balance)
+    initial_balance = float(
+        payload.get("initial_balance")
+        or cfg.execution.account_start_balance
+        or cfg.training.initial_balance
+    )
+    use_validation_balance = _coerce_bool(payload.get("use_validation_balance"), False)
     realistic = _coerce_bool(payload.get("realistic"), True)
     entry_timing = payload.get("entry_timing") or ("next_open" if realistic else "signal_close")
     slippage_pips = float(payload.get("slippage_pips") if payload.get("slippage_pips") is not None else (0.2 if realistic else 0.0))
@@ -418,7 +424,11 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
                 }
                 for c in rows
             ]
-            starting_balance = float(criteria.get("initial_balance") or initial_balance)
+            starting_balance = float(
+                criteria.get("initial_balance")
+                if use_validation_balance and criteria.get("initial_balance")
+                else initial_balance
+            )
             result = run_backtest(
                 BacktestConfig(
                     symbol=symbol,
@@ -439,6 +449,7 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
                     slippage_pips=slippage_pips,
                     min_sl_pips=min_sl_pips,
                     enforce_live_exit_policy=enforce_live_exit_policy,
+                    broker_lot_units=100000 if realistic else None,
                 ),
                 candles,
             )
@@ -493,6 +504,8 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
             "slippage_pips": slippage_pips,
             "min_sl_pips": min_sl_pips,
             "enforce_live_exit_policy": enforce_live_exit_policy,
+            "broker_lot_units": 100000 if realistic else None,
+            "use_validation_balance": use_validation_balance,
             "initial_balance": initial_balance,
             "final_balance_estimate": round(initial_balance + total_pnl, 2),
             "pnl": total_pnl,

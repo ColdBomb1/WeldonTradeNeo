@@ -20,6 +20,7 @@ from services import mt5_trade_service, dxtrade_service, indicator_service, risk
 logger = logging.getLogger(__name__)
 
 LOT_UNITS = {"micro": 1000, "mini": 10000, "standard": 100000}
+BROKER_LOT_UNITS = 100000
 
 _paper_ticket_counter = 100000
 
@@ -60,6 +61,23 @@ def _get_trade_service(account_type: str):
 def _pip_value(symbol: str) -> float:
     """Return pip value for a symbol (0.01 for JPY pairs, 0.0001 otherwise)."""
     return 0.01 if "JPY" in symbol.upper() else 0.0001
+
+
+def _quote_to_account_rate(symbol: str, price: float) -> float:
+    sym = symbol.upper()
+    if sym.endswith("USD") or price <= 0:
+        return 1.0
+    if sym.startswith("USD"):
+        return 1.0 / price
+    return 1.0
+
+
+def _paper_pnl(symbol: str, side: str, entry_price: float, exit_price: float, volume: float) -> float:
+    if side == "buy":
+        raw = (exit_price - entry_price) * volume * BROKER_LOT_UNITS
+    else:
+        raw = (entry_price - exit_price) * volume * BROKER_LOT_UNITS
+    return raw * _quote_to_account_rate(symbol, exit_price)
 
 
 def compute_position_size(
@@ -655,12 +673,9 @@ def _sync_positions_once():
                 ).order_by(Candle.ts.desc()).first()
                 if latest:
                     trade.current_price = latest.close
-                    pip_val = _pip_value(trade.symbol)
-                    lot_units = LOT_UNITS.get(cfg.execution.default_lot_type, 10000)
-                    if trade.side == "buy":
-                        trade.pnl = (latest.close - trade.entry_price) * trade.volume * lot_units
-                    else:
-                        trade.pnl = (trade.entry_price - latest.close) * trade.volume * lot_units
+                    trade.pnl = _paper_pnl(
+                        trade.symbol, trade.side, trade.entry_price, latest.close, trade.volume
+                    )
 
                     # Check SL/TP in paper mode
                     if trade.side == "buy":
@@ -668,26 +683,34 @@ def _sync_positions_once():
                             trade.status = "closed"
                             trade.exit_price = trade.stop_loss
                             trade.exit_type = "sl"
-                            trade.pnl = (trade.stop_loss - trade.entry_price) * trade.volume * lot_units
+                            trade.pnl = _paper_pnl(
+                                trade.symbol, trade.side, trade.entry_price, trade.stop_loss, trade.volume
+                            )
                             trade.closed_at = datetime.now(timezone.utc)
                         elif latest.high >= trade.take_profit:
                             trade.status = "closed"
                             trade.exit_price = trade.take_profit
                             trade.exit_type = "tp"
-                            trade.pnl = (trade.take_profit - trade.entry_price) * trade.volume * lot_units
+                            trade.pnl = _paper_pnl(
+                                trade.symbol, trade.side, trade.entry_price, trade.take_profit, trade.volume
+                            )
                             trade.closed_at = datetime.now(timezone.utc)
                     else:
                         if latest.high >= trade.stop_loss:
                             trade.status = "closed"
                             trade.exit_price = trade.stop_loss
                             trade.exit_type = "sl"
-                            trade.pnl = (trade.entry_price - trade.stop_loss) * trade.volume * lot_units
+                            trade.pnl = _paper_pnl(
+                                trade.symbol, trade.side, trade.entry_price, trade.stop_loss, trade.volume
+                            )
                             trade.closed_at = datetime.now(timezone.utc)
                         elif latest.low <= trade.take_profit:
                             trade.status = "closed"
                             trade.exit_price = trade.take_profit
                             trade.exit_type = "tp"
-                            trade.pnl = (trade.entry_price - trade.take_profit) * trade.volume * lot_units
+                            trade.pnl = _paper_pnl(
+                                trade.symbol, trade.side, trade.entry_price, trade.take_profit, trade.volume
+                            )
                             trade.closed_at = datetime.now(timezone.utc)
 
         # Collect trades that just closed for post-trade analysis

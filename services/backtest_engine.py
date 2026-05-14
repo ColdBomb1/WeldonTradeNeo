@@ -62,6 +62,7 @@ class BacktestConfig:
     min_sl_pips: float = 0.0
     enforce_live_exit_policy: bool = False
     min_reward_risk: float = 1.5
+    broker_lot_units: Optional[int] = None
 
     # Legacy field for backward compatibility with optimizer
     position_size_pct: float = 1.0
@@ -147,6 +148,7 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
 
     spread_cost = config.spread_pips * config.pip_value
     lot_units = LOT_UNITS.get(config.lot_type, 10000)
+    pnl_lot_units = int(config.broker_lot_units or lot_units)
 
     # Precompute strategy indicators (O(n) total)
     precomputed = strategy.precompute(candles, config.parameters)
@@ -170,6 +172,9 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
         if side == "sell":
             return raw_price + slippage
         return raw_price
+
+    def _account_conversion(price: float) -> float:
+        return _quote_to_account_rate(config.symbol, price)
 
     def _build_position(signal, raw_entry_price: float, entry_time: str, atr_index: int) -> _Position:
         entry_price = _entry_price(raw_entry_price, signal.type)
@@ -300,7 +305,8 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
             if exit_price is not None:
                 pnl = _compute_pnl(
                     position.side, position.entry_price, exit_price,
-                    position.volume, lot_units, spread_cost, exit_type,
+                    position.volume, pnl_lot_units, spread_cost, exit_type,
+                    _account_conversion(exit_price),
                 )
                 balance += pnl
                 trade = TradeRecord(
@@ -344,9 +350,19 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
         equity = balance
         if position is not None:
             if position.side == "buy":
-                unrealized = (current_price - position.entry_price) * position.volume * lot_units
+                unrealized = (
+                    (current_price - position.entry_price)
+                    * position.volume
+                    * pnl_lot_units
+                    * _account_conversion(current_price)
+                )
             else:
-                unrealized = (position.entry_price - current_price) * position.volume * lot_units
+                unrealized = (
+                    (position.entry_price - current_price)
+                    * position.volume
+                    * pnl_lot_units
+                    * _account_conversion(current_price)
+                )
             equity += unrealized
 
         equity_curve.append({"time": bar_time, "equity": round(equity, 2)})
@@ -363,7 +379,8 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
         exit_price = _exit_price(last["close"], position.side)
         pnl = _compute_pnl(
             position.side, position.entry_price, exit_price,
-            position.volume, lot_units, spread_cost, "end",
+            position.volume, pnl_lot_units, spread_cost, "end",
+            _account_conversion(exit_price),
         )
         balance += pnl
         trade = TradeRecord(
@@ -452,6 +469,7 @@ def _compute_pnl(
     lot_units: int,
     spread_cost: float,
     exit_type: str,
+    account_conversion: float = 1.0,
 ) -> float:
     """Compute P&L for a closed position in account currency.
 
@@ -465,7 +483,17 @@ def _compute_pnl(
 
     # Spread cost: applied once per round trip
     spread_total = spread_cost * volume_lots * lot_units
-    return raw_pnl - spread_total
+    return (raw_pnl - spread_total) * account_conversion
+
+
+def _quote_to_account_rate(symbol: str, price: float) -> float:
+    """Convert quote-currency P&L into USD account currency for USD majors."""
+    sym = symbol.upper()
+    if sym.endswith("USD") or price <= 0:
+        return 1.0
+    if sym.startswith("USD"):
+        return 1.0 / price
+    return 1.0
 
 
 def _compute_sharpe(equity_curve: List[dict]) -> float:

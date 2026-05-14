@@ -69,6 +69,15 @@ def is_available() -> bool:
     return True
 
 
+def _quote_to_account_rate(symbol: str, price: float) -> float:
+    sym = symbol.upper()
+    if sym.endswith("USD") or price <= 0:
+        return 1.0
+    if sym.startswith("USD"):
+        return 1.0 / price
+    return 1.0
+
+
 _init_lock = threading.Lock()
 
 
@@ -1123,12 +1132,11 @@ def get_deal_history(account: AccountConfig, start: datetime, end: datetime) -> 
         if close_fill:
             exit_price = close_fill["price"]
             exit_type = "tp" if close_fill["order_type"] == "LIMIT" else "sl"
-            # Compute P&L
-            pip_val = 0.01 if "JPY" in symbol.upper() else 0.0001
             if side == "buy":
-                pnl = (exit_price - entry_price) / pip_val * lot_volume * 10
+                pnl = (exit_price - entry_price) * lot_volume * 100000
             else:
-                pnl = (entry_price - exit_price) / pip_val * lot_volume * 10
+                pnl = (entry_price - exit_price) * lot_volume * 100000
+            pnl *= _quote_to_account_rate(symbol, exit_price)
             ts = close_fill["timestamp"]
         else:
             # Position still open — skip, not a completed deal
