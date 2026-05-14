@@ -32,6 +32,27 @@
   </section>
 
   <section class="card">
+    <h2>Simulated Account</h2>
+    <div class="status-grid" id="sim-grid">
+      <div class="status-item"><span class="status-label">Starting Balance</span><span class="status-value" id="sim-starting">--</span></div>
+      <div class="status-item"><span class="status-label">Balance</span><span class="status-value" id="sim-balance">--</span></div>
+      <div class="status-item"><span class="status-label">Equity</span><span class="status-value" id="sim-equity">--</span></div>
+      <div class="status-item"><span class="status-label">Return</span><span class="status-value" id="sim-return">--</span></div>
+      <div class="status-item"><span class="status-label">Realized P&L</span><span class="status-value" id="sim-realized">--</span></div>
+      <div class="status-item"><span class="status-label">Open P&L</span><span class="status-value" id="sim-unrealized">--</span></div>
+      <div class="status-item"><span class="status-label">Open Positions</span><span class="status-value" id="sim-open">--</span></div>
+      <div class="status-item"><span class="status-label">Closed Trades</span><span class="status-value" id="sim-closed">--</span></div>
+      <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value" id="sim-win">--</span></div>
+      <div class="status-item"><span class="status-label">PF</span><span class="status-value" id="sim-pf">--</span></div>
+      <div class="status-item"><span class="status-label">Max DD</span><span class="status-value" id="sim-dd">--</span></div>
+    </div>
+    <p class="small" id="sim-note"></p>
+    <div class="chart-wrap-small">
+      <canvas id="simulated-equity-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Equity Curve</h2>
     <div class="chart-wrap">
       <canvas id="equity-chart"></canvas>
@@ -117,7 +138,7 @@
 
 {% block scripts %}
 <script>
-  let equityChart = null, dailyChart = null;
+  let equityChart = null, dailyChart = null, simulatedEquityChart = null;
 
   function pnlColor(val) {
     if (val == null) return '--';
@@ -129,6 +150,16 @@
     if (val == null) return '--';
     const color = val >= 0.5 ? '#35d48b' : val >= 0.4 ? '#f6b94c' : '#ff6475';
     return `<span style="color:${color}">${(val * 100).toFixed(1)}%</span>`;
+  }
+
+  function moneyText(val) {
+    if (val == null || isNaN(Number(val))) return '--';
+    return '$' + Number(val).toFixed(2);
+  }
+
+  function pctText(val) {
+    if (val == null || isNaN(Number(val))) return '--';
+    return Number(val).toFixed(2) + '%';
   }
 
   function fmtTime(value) {
@@ -148,12 +179,64 @@
   async function reloadPerformanceViews() {
     await Promise.allSettled([
       loadArchiveStatus(),
+      loadSimulatedAccount(),
       loadEquityCurve(),
       loadDailyPnl(),
       loadStrategies(),
       loadSymbols(),
       loadRisk(),
     ]);
+  }
+
+  async function loadSimulatedAccount() {
+    const resp = await fetch('/api/analytics/simulated-account');
+    const data = await resp.json();
+    const s = data.summary || {};
+    document.getElementById('sim-starting').textContent = moneyText(s.starting_balance);
+    document.getElementById('sim-balance').textContent = moneyText(s.balance);
+    document.getElementById('sim-equity').textContent = moneyText(s.equity);
+    document.getElementById('sim-return').innerHTML = `<span style="color:${(s.return_pct || 0) >= 0 ? '#35d48b' : '#ff6475'}">${pctText(s.return_pct)}</span>`;
+    document.getElementById('sim-realized').innerHTML = pnlColor(s.realized_pnl || 0);
+    document.getElementById('sim-unrealized').innerHTML = pnlColor(s.unrealized_pnl || 0);
+    document.getElementById('sim-open').textContent = s.open_positions ?? 0;
+    document.getElementById('sim-closed').textContent = s.closed_trades ?? 0;
+    document.getElementById('sim-win').textContent = s.closed_trades ? ((s.win_rate || 0) * 100).toFixed(1) + '%' : '--';
+    document.getElementById('sim-pf').textContent = s.closed_trades ? Number(s.profit_factor || 0).toFixed(2) : '--';
+    document.getElementById('sim-dd').textContent = pctText(s.max_drawdown_pct || 0);
+    document.getElementById('sim-note').textContent = s.cutoff
+      ? `Showing simulated paper trades after ${fmtTime(s.cutoff)}.`
+      : 'Showing all simulated paper trades.';
+
+    const curve = data.equity_curve || [];
+    if (!curve.length) {
+      if (simulatedEquityChart) {
+        simulatedEquityChart.destroy();
+        simulatedEquityChart = null;
+      }
+      return;
+    }
+    const ctx = document.getElementById('simulated-equity-chart').getContext('2d');
+    if (simulatedEquityChart) simulatedEquityChart.destroy();
+    simulatedEquityChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: curve.map(p => new Date(p.time).toLocaleString()),
+        datasets: [{
+          label: 'Simulated Equity',
+          data: curve.map(p => p.equity),
+          borderColor: '#29c8ff',
+          backgroundColor: 'rgba(41,200,255,0.12)',
+          tension: 0.2,
+          pointRadius: 2,
+          fill: true,
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: { x: { ticks: { maxTicksLimit: 10 } } },
+      }
+    });
   }
 
   async function loadEquityCurve() {

@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
-from services import ai_service, performance_archive, performance_service, risk_manager
+from services import ai_service, performance_archive, performance_service, risk_manager, simulated_account_service
 
 router = APIRouter(tags=["analytics"])
 
@@ -37,6 +37,11 @@ def get_daily_pnl(days: int = 30) -> JSONResponse:
 def get_equity_curve() -> JSONResponse:
     curve = performance_service.get_equity_curve()
     return JSONResponse({"points": len(curve), "curve": curve})
+
+
+@router.get("/api/analytics/simulated-account")
+def get_simulated_account() -> JSONResponse:
+    return JSONResponse(simulated_account_service.get_simulated_account())
 
 
 @router.get("/api/analytics/strategies")
