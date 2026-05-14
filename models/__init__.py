@@ -8,6 +8,7 @@ from .signal import Signal, LiveTrade
 from .news import NewsEvent, SentimentScore
 from .training import TrainingRun, TrainingIteration
 from .ruleset import RuleSet
+from .research import ResearchRun, ResearchCandidate
 
 __all__ = [
     "Base",
@@ -28,4 +29,6 @@ __all__ = [
     "TrainingRun",
     "TrainingIteration",
     "RuleSet",
+    "ResearchRun",
+    "ResearchCandidate",
 ]

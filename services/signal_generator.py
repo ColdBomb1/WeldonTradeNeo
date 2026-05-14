@@ -360,12 +360,9 @@ def _scan_once():
 
 
 def _scan_rulesets():
-    """Scan active rulesets using configured AI rule evaluation."""
+    """Scan active rulesets using AI rules or structured deterministic genomes."""
     cfg = load_config()
     sig_cfg = cfg.signals
-
-    if not ai_service.is_enabled(cfg):
-        return
 
     # Trading session window check (EST/EDT)
     from zoneinfo import ZoneInfo
@@ -380,7 +377,10 @@ def _scan_rulesets():
     session = get_session()
     try:
         active_rulesets = session.query(RuleSet).filter(RuleSet.status == "active").all()
-        rulesets = [(rs.id, rs.name, rs.rules_text, rs.symbols, rs.timeframes) for rs in active_rulesets]
+        rulesets = [
+            (rs.id, rs.name, rs.rules_text, rs.symbols, rs.timeframes, rs.parameters)
+            for rs in active_rulesets
+        ]
     finally:
         session.close()
 
@@ -389,7 +389,12 @@ def _scan_rulesets():
 
     logger.info("Ruleset scan tick: %d active ruleset(s)", len(rulesets))
 
-    for rs_id, rs_name, rules_text, rs_symbols, rs_timeframes in rulesets:
+    for rs_id, rs_name, rules_text, rs_symbols, rs_timeframes, rs_params in rulesets:
+        rs_params = rs_params or {}
+        schema = rs_params.get("strategy_schema") or {}
+        structured = rs_params.get("execution_engine") == "research_genome" and bool(schema)
+        if not structured and not ai_service.is_enabled(cfg):
+            continue
         symbols = rs_symbols if rs_symbols else cfg.symbols
         timeframes = rs_timeframes if rs_timeframes else sig_cfg.timeframes
 
@@ -454,23 +459,38 @@ def _scan_rulesets():
                     skipped_news += 1
                     continue
 
-                # Evaluate rules with the configured AI provider (including cross-pair context)
-                indicators = rule_engine._compute_indicators(candles)
-                if len(all_candles) > 1:
-                    cross_ctx = rule_engine.compute_cross_pair_context(symbol, all_candles)
-                    indicators.update(cross_ctx)
-
-                upcoming_events = news_service.get_events_for_symbol(symbol, hours_ahead=1) if cfg.news.enabled else []
-                # Filter to tight window like backtest
-                upcoming_events = [e for e in upcoming_events if abs(e.get("minutes_until", 999)) <= 45]
-                sentiment = sentiment_service.get_current_sentiment(symbol) if cfg.news.enabled else None
-
                 evaluated += 1
-                result = rule_engine.evaluate_rules(
-                    rules_text, symbol, timeframe, candles,
-                    indicators, upcoming_events, sentiment,
-                    multi_tf_candles=multi_tf_by_symbol.get(symbol),
-                )
+                if structured:
+                    strategy = STRATEGIES.get("research_genome")
+                    if strategy is None:
+                        logger.error("Structured ruleset %d cannot scan: research_genome strategy missing", rs_id)
+                        continue
+                    pre = strategy.precompute(candles, schema)
+                    sig = strategy.evaluate_at(len(candles) - 1, candles, pre, schema)
+                    result = {
+                        "signal": sig.type.name,
+                        "confidence": sig.confidence if sig.confidence is not None else 0.75,
+                        "stop_loss": sig.stop_loss,
+                        "take_profit": sig.take_profit,
+                        "reasoning": sig.reason,
+                    }
+                else:
+                    # Evaluate rules with the configured AI provider (including cross-pair context)
+                    indicators = rule_engine._compute_indicators(candles)
+                    if len(all_candles) > 1:
+                        cross_ctx = rule_engine.compute_cross_pair_context(symbol, all_candles)
+                        indicators.update(cross_ctx)
+
+                    upcoming_events = news_service.get_events_for_symbol(symbol, hours_ahead=1) if cfg.news.enabled else []
+                    # Filter to tight window like backtest
+                    upcoming_events = [e for e in upcoming_events if abs(e.get("minutes_until", 999)) <= 45]
+                    sentiment = sentiment_service.get_current_sentiment(symbol) if cfg.news.enabled else None
+
+                    result = rule_engine.evaluate_rules(
+                        rules_text, symbol, timeframe, candles,
+                        indicators, upcoming_events, sentiment,
+                        multi_tf_candles=multi_tf_by_symbol.get(symbol),
+                    )
 
                 signal_type = result.get("signal", "HOLD")
                 confidence = result.get("confidence", 0)

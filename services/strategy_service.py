@@ -33,6 +33,7 @@ class Signal:
     reason: str = ""
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
+    confidence: Optional[float] = None
 
 
 class BaseStrategy(ABC):
@@ -753,6 +754,234 @@ class BollingerRSIStrategy(BaseStrategy):
         return Signal(SignalType.HOLD, price, ts)
 
 
+class ResearchGenomeStrategy(BaseStrategy):
+    """Deterministic strategy driven by a structured research genome.
+
+    The genome is intentionally explicit: thresholds, weights, filters, and
+    SL/TP policy are data. This lets the research engine mutate and validate
+    candidates without relying on natural-language interpretation.
+    """
+
+    def name(self) -> str:
+        return "research_genome"
+
+    def description(self) -> str:
+        return "Structured weighted setup model for deterministic research candidates."
+
+    def required_params(self) -> List[dict]:
+        return [
+            {"name": "min_score", "type": "float", "label": "Minimum score", "default": 3.0},
+            {"name": "score_margin", "type": "float", "label": "Score margin", "default": 0.35},
+            {"name": "trend_ema", "type": "int", "label": "Trend EMA", "default": 100},
+            {"name": "fast_ema", "type": "int", "label": "Fast EMA", "default": 20},
+            {"name": "medium_ema", "type": "int", "label": "Medium EMA", "default": 50},
+            {"name": "rsi_period", "type": "int", "label": "RSI period", "default": 14},
+            {"name": "rsi_buy_min", "type": "float", "label": "RSI buy min", "default": 42.0},
+            {"name": "rsi_buy_max", "type": "float", "label": "RSI buy max", "default": 68.0},
+            {"name": "rsi_sell_min", "type": "float", "label": "RSI sell min", "default": 32.0},
+            {"name": "rsi_sell_max", "type": "float", "label": "RSI sell max", "default": 58.0},
+            {"name": "sl_atr_multiplier", "type": "float", "label": "SL ATR", "default": 2.0},
+            {"name": "tp_rr", "type": "float", "label": "TP risk/reward", "default": 1.7},
+        ]
+
+    def default_params(self) -> dict:
+        return {
+            "schema_version": 1,
+            "min_score": 3.0,
+            "score_margin": 0.35,
+            "long_enabled": True,
+            "short_enabled": True,
+            "trend_ema": 100,
+            "fast_ema": 20,
+            "medium_ema": 50,
+            "rsi_period": 14,
+            "rsi_buy_min": 42.0,
+            "rsi_buy_max": 68.0,
+            "rsi_sell_min": 32.0,
+            "rsi_sell_max": 58.0,
+            "macd_fast": 12,
+            "macd_slow": 26,
+            "macd_signal": 9,
+            "bb_period": 20,
+            "bb_std": 2.0,
+            "bb_near_pct": 0.35,
+            "atr_period": 14,
+            "atr_min_ratio": 0.55,
+            "atr_max_ratio": 2.8,
+            "breakout_lookback": 20,
+            "sl_atr_multiplier": 2.0,
+            "tp_rr": 1.7,
+            "weights": {
+                "trend": 1.0,
+                "ema_stack": 0.9,
+                "rsi_zone": 0.8,
+                "rsi_turn": 0.8,
+                "macd": 0.8,
+                "bb_pullback": 0.6,
+                "breakout": 0.5,
+                "candle": 0.35,
+                "volatility": 0.45,
+            },
+        }
+
+    def evaluate(self, candles: List[dict], params: dict) -> Signal:
+        pre = self.precompute(candles, params)
+        return self.evaluate_at(len(candles) - 1, candles, pre, params)
+
+    def precompute(self, candles, params):
+        p = self._merged(params)
+        closes = [c["close"] for c in candles]
+        macd_data = indicator_service.macd(
+            closes,
+            int(p["macd_fast"]),
+            int(p["macd_slow"]),
+            int(p["macd_signal"]),
+        )
+        bb = indicator_service.bollinger_bands(
+            closes,
+            int(p["bb_period"]),
+            float(p["bb_std"]),
+        )
+        atr_vals = indicator_service.atr(candles, int(p["atr_period"]))
+        return {
+            "closes": closes,
+            "fast": indicator_service.ema(closes, int(p["fast_ema"])),
+            "medium": indicator_service.ema(closes, int(p["medium_ema"])),
+            "trend": indicator_service.ema(closes, int(p["trend_ema"])),
+            "rsi": indicator_service.rsi(closes, int(p["rsi_period"])),
+            "macd_hist": macd_data["histogram"],
+            "bb_lower": bb["lower"],
+            "bb_upper": bb["upper"],
+            "atr": atr_vals,
+            "atr_avg": self._rolling_avg(atr_vals, 20),
+            "highs": [c["high"] for c in candles],
+            "lows": [c["low"] for c in candles],
+        }
+
+    def evaluate_at(self, i, candles, pre, params):
+        p = self._merged(params)
+        price = pre["closes"][i]
+        ts = datetime.fromisoformat(candles[i]["time"])
+        if i < max(int(p["trend_ema"]), int(p["bb_period"]), int(p["macd_slow"]) + int(p["macd_signal"]), 30):
+            return Signal(SignalType.HOLD, price, ts, "Indicators not ready", confidence=0.0)
+
+        values = [
+            pre["fast"][i], pre["medium"][i], pre["trend"][i], pre["rsi"][i],
+            pre["macd_hist"][i], pre["bb_lower"][i], pre["bb_upper"][i], pre["atr"][i],
+        ]
+        if any(v is None for v in values):
+            return Signal(SignalType.HOLD, price, ts, "Indicators not ready", confidence=0.0)
+
+        buy_score, buy_parts = self._score_side("buy", i, candles, pre, p)
+        sell_score, sell_parts = self._score_side("sell", i, candles, pre, p)
+        min_score = float(p["min_score"])
+        margin = float(p["score_margin"])
+        max_possible = max(sum(float(v) for v in p["weights"].values()), min_score)
+
+        side = SignalType.HOLD
+        score = max(buy_score, sell_score)
+        parts: list[str] = []
+        if p.get("long_enabled", True) and buy_score >= min_score and buy_score >= sell_score + margin:
+            side = SignalType.BUY
+            parts = buy_parts
+        elif p.get("short_enabled", True) and sell_score >= min_score and sell_score >= buy_score + margin:
+            side = SignalType.SELL
+            parts = sell_parts
+        else:
+            return Signal(
+                SignalType.HOLD,
+                price,
+                ts,
+                f"No edge: buy_score={buy_score:.2f}, sell_score={sell_score:.2f}",
+                confidence=round(min(score / max_possible, 1.0), 3),
+            )
+
+        atr = pre["atr"][i] or price * 0.005
+        sl_dist = max(atr * float(p["sl_atr_multiplier"]), price * 0.0005)
+        tp_dist = sl_dist * float(p["tp_rr"])
+        if side == SignalType.BUY:
+            sl = price - sl_dist
+            tp = price + tp_dist
+        else:
+            sl = price + sl_dist
+            tp = price - tp_dist
+        confidence = round(min(score / max_possible, 1.0), 3)
+        return Signal(
+            side,
+            price,
+            ts,
+            f"{side.value.upper()} score={score:.2f}: {', '.join(parts[:5])}",
+            stop_loss=sl,
+            take_profit=tp,
+            confidence=confidence,
+        )
+
+    def _score_side(self, side: str, i: int, candles: List[dict], pre: dict, p: dict) -> tuple[float, list[str]]:
+        w = p["weights"]
+        price = pre["closes"][i]
+        prev_price = pre["closes"][i - 1]
+        fast, medium, trend = pre["fast"][i], pre["medium"][i], pre["trend"][i]
+        pfast, pmedium = pre["fast"][i - 1], pre["medium"][i - 1]
+        rsi, prev_rsi = pre["rsi"][i], pre["rsi"][i - 1]
+        hist, prev_hist = pre["macd_hist"][i], pre["macd_hist"][i - 1]
+        lower, upper = pre["bb_lower"][i], pre["bb_upper"][i]
+        atr, atr_avg = pre["atr"][i], pre["atr_avg"][i]
+        lookback = int(p["breakout_lookback"])
+        start = max(0, i - lookback)
+        prior_high = max(pre["highs"][start:i]) if i > start else candles[i]["high"]
+        prior_low = min(pre["lows"][start:i]) if i > start else candles[i]["low"]
+
+        score = 0.0
+        parts: list[str] = []
+        is_buy = side == "buy"
+
+        def add(key: str, condition: bool, label: str) -> None:
+            nonlocal score
+            if condition:
+                score += float(w.get(key, 0))
+                parts.append(label)
+
+        add("trend", price > trend if is_buy else price < trend, "trend")
+        add("ema_stack", fast > medium if is_buy else fast < medium, "ema stack")
+        add("rsi_zone", float(p["rsi_buy_min"] if is_buy else p["rsi_sell_min"]) <= rsi <= float(p["rsi_buy_max"] if is_buy else p["rsi_sell_max"]), "rsi zone")
+        add("rsi_turn", rsi > prev_rsi if is_buy else rsi < prev_rsi, "rsi turn")
+        add("macd", hist is not None and prev_hist is not None and (hist > prev_hist if is_buy else hist < prev_hist), "macd")
+        if upper is not None and lower is not None and upper > lower:
+            band_width = upper - lower
+            add("bb_pullback", price <= lower + band_width * float(p["bb_near_pct"]) if is_buy else price >= upper - band_width * float(p["bb_near_pct"]), "bb pullback")
+        add("breakout", price > prior_high and prev_price <= prior_high if is_buy else price < prior_low and prev_price >= prior_low, "breakout")
+        add("candle", candles[i]["close"] > candles[i]["open"] if is_buy else candles[i]["close"] < candles[i]["open"], "candle")
+        if atr and atr_avg and atr_avg > 0:
+            ratio = atr / atr_avg
+            add("volatility", float(p["atr_min_ratio"]) <= ratio <= float(p["atr_max_ratio"]), "volatility")
+        if pfast is not None and pmedium is not None:
+            add("ema_stack", pfast <= pmedium and fast > medium if is_buy else pfast >= pmedium and fast < medium, "ema cross")
+
+        return score, parts
+
+    def _merged(self, params: dict) -> dict:
+        merged = self.default_params()
+        for key, value in (params or {}).items():
+            if key == "weights" and isinstance(value, dict):
+                merged["weights"] = {**merged["weights"], **value}
+            else:
+                merged[key] = value
+        return merged
+
+    @staticmethod
+    def _rolling_avg(values: List[Optional[float]], period: int) -> List[Optional[float]]:
+        result: List[Optional[float]] = [None] * len(values)
+        window: list[float] = []
+        for i, value in enumerate(values):
+            if value is not None:
+                window.append(value)
+            if len(window) > period:
+                window.pop(0)
+            if len(window) == period:
+                result[i] = sum(window) / period
+        return result
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -768,6 +997,7 @@ STRATEGIES: dict[str, BaseStrategy] = {
     "triple_screen": TripleScreenStrategy(),
     "ema_confluence": EMAConfluenceStrategy(),
     "bollinger_rsi": BollingerRSIStrategy(),
+    "research_genome": ResearchGenomeStrategy(),
 }
 
 

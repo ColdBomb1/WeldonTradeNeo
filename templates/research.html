@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% set active_page = "research" %}
+
+{% block title %}Research - WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Strategy Research</h1>
+  <p>Run structured evolution over deterministic strategy genomes with walk-forward validation.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Start Research Run</h2>
+    <div class="row">
+      <label>Name <input id="name" placeholder="Auto-generated if blank" /></label>
+      <label>Timeframe
+        <select id="timeframe">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == '15m' %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Start <input type="date" id="start" /></label>
+      <label>End <input type="date" id="end" /></label>
+    </div>
+    <div class="row">
+      <label>Symbols
+        <select id="symbols" multiple style="height:90px">
+          {% for s in symbols %}
+          <option value="{{ s }}" selected>{{ s }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <label>Population <input type="number" id="population" min="6" max="80" value="{{ defaults.population_size }}" /></label>
+      <label>Generations <input type="number" id="generations" min="1" max="40" value="{{ defaults.generations }}" /></label>
+      <label>Walk-Forward Folds <input type="number" id="folds" min="1" max="8" value="{{ defaults.folds }}" /></label>
+    </div>
+    <div class="row">
+      <label>Max DD % <input type="number" id="max-dd" min="0.5" max="50" step="0.5" value="{{ defaults.max_drawdown_pct }}" /></label>
+      <label>Min PF <input type="number" id="min-pf" min="0.5" max="10" step="0.05" value="{{ defaults.min_profit_factor }}" /></label>
+      <label>Min Validation Trades <input type="number" id="min-trades" min="1" max="500" value="{{ defaults.min_validation_trades }}" /></label>
+      <label>Risk / Trade % <input type="number" id="risk" min="0.05" max="5" step="0.05" value="{{ defaults.risk_per_trade_pct }}" /></label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="start-btn">Start Research</button>
+      </div>
+    </div>
+    <div id="progress" class="small" style="margin-top:10px"></div>
+  </section>
+
+  <section class="card">
+    <h2>Research Runs</h2>
+    <table class="table" id="runs-table">
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Name</th>
+          <th>Status</th>
+          <th>Symbols</th>
+          <th>TF</th>
+          <th>Best</th>
+          <th>Candidate</th>
+          <th>Created</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="9" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card" id="detail" style="display:none">
+    <h2 id="detail-title">Run Detail</h2>
+    <div id="summary" class="status-grid"></div>
+
+    <h3>Top Candidates</h3>
+    <table class="table" id="candidates-table">
+      <thead>
+        <tr>
+          <th>Rank</th>
+          <th>Status</th>
+          <th>Score</th>
+          <th>Trades</th>
+          <th>Return</th>
+          <th>PF</th>
+          <th>Max DD</th>
+          <th>Worst Symbol</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h3>AI Review</h3>
+    <div id="ai-review" style="white-space:pre-wrap;font-size:13px;max-height:300px;overflow:auto"></div>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let activeRunId = null;
+  let pollTimer = null;
+
+  const today = new Date();
+  const start = new Date(today);
+  start.setMonth(start.getMonth() - 6);
+  const dateStr = d => d.toISOString().slice(0, 10);
+  document.getElementById('start').value = dateStr(start);
+  document.getElementById('end').value = dateStr(today);
+
+  function badge(status) {
+    const colors = { running: '#e67e22', completed: '#27ae60', failed: '#e74c3c', stopped: '#888', pending: '#888' };
+    return `<span style="display:inline-block;padding:2px 8px;border-radius:4px;background:${colors[status]||'#888'};color:#fff;font-size:12px">${status}</span>`;
+  }
+
+  function fmtPct(v) {
+    if (v == null) return '--';
+    const c = v >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="color:${c};font-weight:600">${v.toFixed(2)}%</span>`;
+  }
+
+  async function loadRuns() {
+    const resp = await fetch('/api/research/runs');
+    const data = await resp.json();
+    const tbody = document.querySelector('#runs-table tbody');
+    tbody.innerHTML = '';
+    const runs = data.runs || [];
+    if (!runs.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No research runs yet.</td></tr>';
+      return;
+    }
+    runs.forEach(run => {
+      const best = run.best || {};
+      const vm = best.validation_metrics || {};
+      const row = document.createElement('tr');
+      row.style.cursor = 'pointer';
+      row.innerHTML = `
+        <td>${run.id}</td>
+        <td>${run.name}</td>
+        <td>${badge(run.status)}</td>
+        <td>${(run.symbols||[]).join(', ')}</td>
+        <td>${run.timeframe}</td>
+        <td>${vm.total_trades != null ? `${fmtPct(vm.return_pct)} PF ${vm.profit_factor?.toFixed(2) ?? '--'} DD ${(vm.max_drawdown*100).toFixed(1)}%` : '--'}</td>
+        <td>${run.candidate_ruleset_id ? `<a href="/rulesets" onclick="event.stopPropagation()">#${run.candidate_ruleset_id}</a>` : '--'}</td>
+        <td>${new Date(run.created_at).toLocaleString()}</td>
+        <td><button onclick="event.stopPropagation();showRun(${run.id})">View</button>${run.status === 'running' ? ` <button onclick="event.stopPropagation();stopRun(${run.id})">Stop</button>` : ''}</td>
+      `;
+      row.addEventListener('click', () => showRun(run.id));
+      tbody.appendChild(row);
+    });
+  }
+
+  async function showRun(id) {
+    const resp = await fetch(`/api/research/runs/${id}`);
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+    const run = data.run;
+    const best = run.result?.best_candidate || {};
+    const vm = best.validation_metrics || {};
+    document.getElementById('detail').style.display = '';
+    document.getElementById('detail-title').textContent = `Run #${run.id}: ${run.name}`;
+    document.getElementById('summary').innerHTML = `
+      <div class="status-item"><span class="status-label">Status</span><span class="status-value">${badge(run.status)}</span></div>
+      <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${best.passed ? 'passed' : 'not passed'}</span></div>
+      <div class="status-item"><span class="status-label">Return</span><span class="status-value">${fmtPct(vm.return_pct)}</span></div>
+      <div class="status-item"><span class="status-label">Trades</span><span class="status-value">${vm.total_trades ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">PF</span><span class="status-value">${vm.profit_factor?.toFixed(2) ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">Max DD</span><span class="status-value">${vm.max_drawdown != null ? (vm.max_drawdown*100).toFixed(2)+'%' : '--'}</span></div>
+      <div class="status-item"><span class="status-label">Ruleset</span><span class="status-value">${run.candidate_ruleset_id ? '#'+run.candidate_ruleset_id : '--'}</span></div>
+    `;
+
+    const tbody = document.querySelector('#candidates-table tbody');
+    tbody.innerHTML = '';
+    (data.candidates || []).forEach(c => {
+      const m = c.validation_metrics || {};
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${c.rank}</td>
+        <td>${c.passed ? '<span style="color:#27ae60;font-weight:600">passed</span>' : '<span style="color:#e74c3c">failed</span>'}</td>
+        <td>${c.score?.toFixed(3) ?? '--'}</td>
+        <td>${m.total_trades ?? '--'}</td>
+        <td>${fmtPct(m.return_pct)}</td>
+        <td>${m.profit_factor?.toFixed(2) ?? '--'}</td>
+        <td>${m.max_drawdown != null ? (m.max_drawdown*100).toFixed(2)+'%' : '--'}</td>
+        <td>${fmtPct(m.worst_symbol_return_pct)}</td>
+      `;
+      tbody.appendChild(row);
+    });
+    document.getElementById('ai-review').textContent = run.result?.ai_review
+      ? JSON.stringify(run.result.ai_review, null, 2)
+      : 'No AI review recorded.';
+    document.getElementById('detail').scrollIntoView({ behavior: 'smooth' });
+  }
+
+  async function pollProgress() {
+    if (!activeRunId) return;
+    const resp = await fetch(`/api/research/runs/${activeRunId}/progress`);
+    const p = await resp.json();
+    if (p.error) return;
+    const bm = p.best_metrics || {};
+    document.getElementById('progress').innerHTML =
+      `Run #${activeRunId}: ${p.status} | generation ${p.generation}/${p.generations} | candidate ${p.candidate || '--'}/${p.population_size || '--'} | best score ${p.best_score ?? '--'} | trades ${bm.total_trades ?? '--'} | return ${bm.return_pct ?? '--'}%`;
+    if (p.status !== 'running') {
+      clearInterval(pollTimer); pollTimer = null;
+      activeRunId = null;
+      document.getElementById('start-btn').disabled = false;
+      document.getElementById('start-btn').textContent = 'Start Research';
+      loadRuns();
+    }
+  }
+
+  async function stopRun(id) {
+    await fetch(`/api/research/runs/${id}/stop`, { method: 'POST' });
+  }
+
+  document.getElementById('start-btn').addEventListener('click', async () => {
+    const btn = document.getElementById('start-btn');
+    btn.disabled = true;
+    btn.textContent = 'Starting...';
+    document.getElementById('progress').textContent = '';
+    const symbols = [...document.getElementById('symbols').selectedOptions].map(o => o.value);
+    const payload = {
+      name: document.getElementById('name').value,
+      symbols,
+      timeframe: document.getElementById('timeframe').value,
+      start_date: document.getElementById('start').value + 'T00:00:00+00:00',
+      end_date: document.getElementById('end').value + 'T23:59:59+00:00',
+      settings: {
+        population_size: parseInt(document.getElementById('population').value) || 18,
+        generations: parseInt(document.getElementById('generations').value) || 5,
+        folds: parseInt(document.getElementById('folds').value) || 3,
+        max_drawdown_pct: parseFloat(document.getElementById('max-dd').value) || 6,
+        min_profit_factor: parseFloat(document.getElementById('min-pf').value) || 1.15,
+        min_validation_trades: parseInt(document.getElementById('min-trades').value) || 20,
+        risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,
+        ai_review: true,
+      },
+    };
+    const resp = await fetch('/api/research/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      btn.disabled = false;
+      btn.textContent = 'Start Research';
+      document.getElementById('progress').innerHTML = `<span style="color:#e74c3c">${data.error}</span>`;
+      return;
+    }
+    activeRunId = data.run_id;
+    btn.textContent = 'Running...';
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollProgress, 2000);
+    pollProgress();
+  });
+
+  loadRuns();
+</script>
+{% endblock %}
