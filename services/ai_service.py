@@ -100,6 +100,7 @@ def generate_text(
             "model": _model(cfg, review=review),
             "messages": messages,
             "stream": False,
+            "think": False,
             "options": {
                 "temperature": temp,
                 "num_predict": _max_tokens(cfg, review=review, override=max_tokens),
