@@ -706,6 +706,19 @@ async def validate_portfolio_candidates(request: Request) -> JSONResponse:
         session.close()
 
 
+@router.post("/api/rulesets/portfolio/readiness")
+async def evaluate_portfolio_live_readiness(request: Request) -> JSONResponse:
+    payload = await request.json()
+    cfg = load_config()
+    session = get_session()
+    try:
+        result = portfolio_milestone.evaluate_live_readiness(session, payload, cfg)
+        status_code = 400 if result.get("error") else 200
+        return JSONResponse(result, status_code=status_code)
+    finally:
+        session.close()
+
+
 @router.post("/api/rulesets/portfolio/promote")
 async def promote_portfolio_candidates(request: Request) -> JSONResponse:
     payload = await request.json()

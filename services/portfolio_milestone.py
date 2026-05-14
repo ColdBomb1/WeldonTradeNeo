@@ -21,6 +21,27 @@ DEFAULT_TARGETS = {
     "min_long_trades": 1,
 }
 
+LIVE_READINESS_DEFAULTS = {
+    "windows": [
+        {"days": 7, "min_return_pct": 0.0, "max_drawdown_pct": 4.0, "min_trades": 8, "min_profit_factor": 1.05},
+        {"days": 14, "min_return_pct": 2.5, "max_drawdown_pct": 5.0, "min_trades": 20, "min_profit_factor": 1.20},
+        {"days": 30, "min_return_pct": 6.0, "max_drawdown_pct": 5.0, "min_trades": 50, "min_profit_factor": 1.20},
+        {"days": 60, "min_return_pct": 10.0, "max_drawdown_pct": 6.0, "min_trades": 100, "min_profit_factor": 1.15},
+    ],
+    "stress_windows": [
+        {"days": 14, "min_return_pct": 1.5, "max_drawdown_pct": 6.0, "min_trades": 20, "min_profit_factor": 1.05},
+        {"days": 30, "min_return_pct": 4.0, "max_drawdown_pct": 6.0, "min_trades": 50, "min_profit_factor": 1.10},
+    ],
+    "cost_stress_multiplier": 1.5,
+    "min_symbols": 4,
+    "max_symbol_14d_loss_pct": 1.0,
+    "min_symbol_30d_return_pct": 0.0,
+    "min_symbol_60d_return_pct": 0.0,
+    "max_symbol_30d_drawdown_pct": 3.5,
+    "max_symbol_60d_drawdown_pct": 4.0,
+    "max_30d_pnl_concentration": 0.45,
+}
+
 
 def normalize_targets(payload: dict | None = None) -> dict:
     payload = payload or {}
@@ -37,6 +58,59 @@ def normalize_targets(payload: dict | None = None) -> dict:
     targets["min_short_trades"] = max(0, int(targets["min_short_trades"]))
     targets["min_long_trades"] = max(0, int(targets["min_long_trades"]))
     return targets
+
+
+def normalize_live_readiness(raw: dict | None = None) -> dict:
+    raw = raw or {}
+    readiness = dict(LIVE_READINESS_DEFAULTS)
+    readiness["windows"] = [
+        _normalize_readiness_window(item)
+        for item in (raw.get("windows") or LIVE_READINESS_DEFAULTS["windows"])
+    ]
+    readiness["stress_windows"] = [
+        _normalize_readiness_window(item)
+        for item in (raw.get("stress_windows") or LIVE_READINESS_DEFAULTS["stress_windows"])
+    ]
+    readiness["cost_stress_multiplier"] = max(
+        1.0,
+        min(5.0, float(raw.get("cost_stress_multiplier") or readiness["cost_stress_multiplier"])),
+    )
+    readiness["min_symbols"] = max(1, min(20, int(raw.get("min_symbols") or readiness["min_symbols"])))
+    readiness["max_symbol_14d_loss_pct"] = max(
+        0.0,
+        min(20.0, float(raw.get("max_symbol_14d_loss_pct") or readiness["max_symbol_14d_loss_pct"])),
+    )
+    readiness["min_symbol_30d_return_pct"] = max(
+        -20.0,
+        min(50.0, float(raw.get("min_symbol_30d_return_pct") or readiness["min_symbol_30d_return_pct"])),
+    )
+    readiness["min_symbol_60d_return_pct"] = max(
+        -20.0,
+        min(50.0, float(raw.get("min_symbol_60d_return_pct") or readiness["min_symbol_60d_return_pct"])),
+    )
+    readiness["max_symbol_30d_drawdown_pct"] = max(
+        0.1,
+        min(50.0, float(raw.get("max_symbol_30d_drawdown_pct") or readiness["max_symbol_30d_drawdown_pct"])),
+    )
+    readiness["max_symbol_60d_drawdown_pct"] = max(
+        0.1,
+        min(50.0, float(raw.get("max_symbol_60d_drawdown_pct") or readiness["max_symbol_60d_drawdown_pct"])),
+    )
+    readiness["max_30d_pnl_concentration"] = max(
+        0.1,
+        min(1.0, float(raw.get("max_30d_pnl_concentration") or readiness["max_30d_pnl_concentration"])),
+    )
+    return readiness
+
+
+def _normalize_readiness_window(raw: dict) -> dict:
+    return {
+        "days": max(1, min(180, int(raw.get("days") or 14))),
+        "min_return_pct": max(-50.0, min(100.0, float(raw.get("min_return_pct") or 0.0))),
+        "max_drawdown_pct": max(0.1, min(50.0, float(raw.get("max_drawdown_pct") or 6.0))),
+        "min_trades": max(0, min(10000, int(raw.get("min_trades") or 0))),
+        "min_profit_factor": max(0.1, min(10.0, float(raw.get("min_profit_factor") or 1.0))),
+    }
 
 
 def normalize_options(payload: dict | None, cfg) -> dict:
@@ -202,6 +276,189 @@ def validate_portfolio(session, payload: dict | None, cfg) -> dict:
         "short": short,
         "long": long,
         "search": _compact_search_result(search_result) if search_result else None,
+    }
+
+
+def evaluate_live_readiness(session, payload: dict | None, cfg) -> dict:
+    payload = payload or {}
+    readiness = normalize_live_readiness(payload.get("readiness") or payload)
+    options = normalize_options(payload, cfg)
+    selected_ids = _normalize_ruleset_ids(payload.get("ruleset_ids"))
+    selection_source = "explicit" if selected_ids else "active"
+
+    query = session.query(RuleSet)
+    if selected_ids:
+        rulesets = query.filter(RuleSet.id.in_(selected_ids)).order_by(RuleSet.id.asc()).all()
+        found_ids = {int(rs.id) for rs in rulesets}
+        missing_ids = [ruleset_id for ruleset_id in selected_ids if ruleset_id not in found_ids]
+    else:
+        rulesets = query.filter(RuleSet.status == "active").order_by(RuleSet.id.asc()).all()
+        missing_ids = []
+
+    scopes = build_structured_scopes(session, rulesets)
+    selected_conflicts = _selected_scope_conflicts(scopes)
+    if missing_ids or selected_conflicts:
+        reasons = []
+        if missing_ids:
+            reasons.append(f"Missing rulesets: {', '.join(str(item) for item in missing_ids)}.")
+        reasons.extend(selected_conflicts)
+        return {
+            "selection_source": selection_source,
+            "status": {"passed": False, "status": "failed", "reasons": reasons},
+            "readiness": readiness,
+            "selected_rulesets": _selected_rulesets_summary(rulesets),
+        }
+    if not scopes:
+        return {
+            "selection_source": selection_source,
+            "status": {
+                "passed": False,
+                "status": "failed",
+                "reasons": ["No selected rulesets contain structured research strategies."],
+            },
+            "readiness": readiness,
+            "selected_rulesets": _selected_rulesets_summary(rulesets),
+        }
+
+    common_end = options["end_date"] or min(item["latest"] for item in scopes)
+    baseline = _evaluate_readiness_windows(session, scopes, readiness["windows"], options, common_end)
+    stress_options = dict(options)
+    stress_options["spread_multiplier"] = readiness["cost_stress_multiplier"]
+    stress_options["slippage_pips"] = float(options["slippage_pips"]) * readiness["cost_stress_multiplier"]
+    stress = _evaluate_readiness_windows(session, scopes, readiness["stress_windows"], stress_options, common_end)
+    status = score_live_readiness(baseline, stress, readiness, scopes)
+    return {
+        "evaluated_at": datetime.now(timezone.utc).isoformat(),
+        "selection_source": selection_source,
+        "selected_ruleset_ids": [int(rs.id) for rs in rulesets],
+        "selected_rulesets": _selected_rulesets_summary(rulesets),
+        "options": _public_options(options),
+        "readiness": readiness,
+        "status": status,
+        "baseline": baseline,
+        "stress": stress,
+    }
+
+
+def _evaluate_readiness_windows(
+    session,
+    scopes: list[dict],
+    windows: list[dict],
+    options: dict,
+    common_end: datetime,
+) -> dict:
+    evaluations = {}
+    for window in windows:
+        days = int(window["days"])
+        result = evaluate_portfolio_scopes(
+            session,
+            scopes,
+            days=days,
+            options=options,
+            common_end=common_end,
+        )
+        evaluations[str(days)] = _compact_portfolio_evaluation(result)
+    return evaluations
+
+
+def score_live_readiness(
+    baseline: dict,
+    stress: dict,
+    readiness: dict,
+    scopes: list[dict],
+) -> dict:
+    reasons = []
+    gates = {
+        "baseline": _score_readiness_windows(baseline, readiness["windows"], "baseline"),
+        "stress": _score_readiness_windows(stress, readiness["stress_windows"], "stress"),
+        "symbol_balance": _score_symbol_balance(baseline, readiness, scopes),
+    }
+    for gate_name, gate in gates.items():
+        reasons.extend(f"{gate_name}: {reason}" for reason in gate["reasons"])
+    return {
+        "passed": not reasons,
+        "status": "ready" if not reasons else "not_ready",
+        "reasons": reasons,
+        "gates": gates,
+    }
+
+
+def _score_readiness_windows(evaluations: dict, windows: list[dict], label: str) -> dict:
+    reasons = []
+    per_window = {}
+    for window in windows:
+        days = int(window["days"])
+        key = str(days)
+        portfolio = (evaluations.get(key) or {}).get("portfolio") or {}
+        gate = _score_window(
+            portfolio,
+            window["min_return_pct"],
+            window["max_drawdown_pct"],
+            window["min_trades"],
+        )
+        if float(portfolio.get("profit_factor") or 0.0) < float(window["min_profit_factor"]):
+            gate["reasons"].append(
+                f"profit factor {float(portfolio.get('profit_factor') or 0.0):.2f} below {float(window['min_profit_factor']):.2f}"
+            )
+            gate["passed"] = False
+            gate["status"] = "failed"
+        per_window[key] = gate
+        reasons.extend(f"{days}d {reason}" for reason in gate["reasons"])
+    return {
+        "passed": not reasons,
+        "status": "passed" if not reasons else "failed",
+        "label": label,
+        "windows": per_window,
+        "reasons": reasons,
+    }
+
+
+def _score_symbol_balance(baseline: dict, readiness: dict, scopes: list[dict]) -> dict:
+    reasons = []
+    symbols = sorted({str(scope["symbol"]).upper() for scope in scopes})
+    if len(symbols) < int(readiness["min_symbols"]):
+        reasons.append(f"symbols {len(symbols)} below {int(readiness['min_symbols'])}")
+
+    window_14 = baseline.get("14") or {}
+    window_30 = baseline.get("30") or {}
+    window_60 = baseline.get("60") or {}
+    for strategy in window_14.get("strategies") or []:
+        if float(strategy.get("return_pct") or 0.0) < -float(readiness["max_symbol_14d_loss_pct"]):
+            reasons.append(
+                f"{strategy.get('symbol')} 14d return {float(strategy.get('return_pct') or 0.0):.2f}% below -{float(readiness['max_symbol_14d_loss_pct']):.2f}%"
+            )
+    for strategy in window_30.get("strategies") or []:
+        if float(strategy.get("return_pct") or 0.0) < float(readiness["min_symbol_30d_return_pct"]):
+            reasons.append(
+                f"{strategy.get('symbol')} 30d return {float(strategy.get('return_pct') or 0.0):.2f}% below {float(readiness['min_symbol_30d_return_pct']):.2f}%"
+            )
+        if float(strategy.get("max_drawdown_pct") or 0.0) > float(readiness["max_symbol_30d_drawdown_pct"]):
+            reasons.append(
+                f"{strategy.get('symbol')} 30d drawdown {float(strategy.get('max_drawdown_pct') or 0.0):.2f}% exceeds {float(readiness['max_symbol_30d_drawdown_pct']):.2f}%"
+            )
+    for strategy in window_60.get("strategies") or []:
+        if float(strategy.get("return_pct") or 0.0) < float(readiness["min_symbol_60d_return_pct"]):
+            reasons.append(
+                f"{strategy.get('symbol')} 60d return {float(strategy.get('return_pct') or 0.0):.2f}% below {float(readiness['min_symbol_60d_return_pct']):.2f}%"
+            )
+        if float(strategy.get("max_drawdown_pct") or 0.0) > float(readiness["max_symbol_60d_drawdown_pct"]):
+            reasons.append(
+                f"{strategy.get('symbol')} 60d drawdown {float(strategy.get('max_drawdown_pct') or 0.0):.2f}% exceeds {float(readiness['max_symbol_60d_drawdown_pct']):.2f}%"
+            )
+
+    strategies_30 = window_30.get("strategies") or []
+    total_pnl = sum(max(0.0, float(item.get("pnl") or 0.0)) for item in strategies_30)
+    if total_pnl > 0.0 and strategies_30:
+        concentration = max(max(0.0, float(item.get("pnl") or 0.0)) for item in strategies_30) / total_pnl
+        if concentration > float(readiness["max_30d_pnl_concentration"]):
+            reasons.append(
+                f"30d PnL concentration {concentration:.2f} exceeds {float(readiness['max_30d_pnl_concentration']):.2f}"
+            )
+    return {
+        "passed": not reasons,
+        "status": "passed" if not reasons else "failed",
+        "symbols": symbols,
+        "reasons": reasons,
     }
 
 
@@ -669,7 +926,7 @@ def _run_structured_scope(
             start_date=start,
             end_date=end,
             initial_balance=starting_balance,
-            spread_pips=float(criteria.get("spread_pips") or 1.5),
+            spread_pips=float(criteria.get("spread_pips") or 1.5) * float(options.get("spread_multiplier") or 1.0),
             pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
             lot_type=str(criteria.get("lot_type") or "mini"),
             risk_per_trade_pct=float(criteria.get("risk_per_trade_pct") or 0.35),
@@ -712,6 +969,24 @@ def _scope_result_dict(item: dict, result: BacktestResults, starting_balance: fl
         "sharpe_ratio": result.sharpe_ratio,
         "equity_curve": result.equity_curve,
         "trades": result.trades,
+    }
+
+
+def _compact_portfolio_evaluation(evaluation: dict) -> dict:
+    return {
+        "portfolio": evaluation.get("portfolio") or {},
+        "strategies": [
+            _compact_strategy_result(item)
+            for item in evaluation.get("strategies") or []
+        ],
+    }
+
+
+def _compact_strategy_result(item: dict) -> dict:
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in {"equity_curve", "trades"}
     }
 
 
