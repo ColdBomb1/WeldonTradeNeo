@@ -575,23 +575,38 @@ def _public_portfolio(portfolio: dict) -> dict:
 def _portfolio_score(combo: tuple[dict, ...], targets: dict, initial_balance: float) -> float:
     if not combo:
         return -9999.0
-    short = _combine_candidate_window(combo, "short", initial_balance, targets["short_days"])
-    long = _combine_candidate_window(combo, "long", initial_balance, targets["long_days"])
-    status = score_milestone(short, long, targets)
-    short_gap = float(short["return_pct"]) - float(targets["min_short_return_pct"])
-    long_gap = float(long["return_pct"]) - float(targets["min_long_return_pct"])
-    dd = max(float(short["max_drawdown_pct"]), float(long["max_drawdown_pct"]))
+    short_pnl = sum(float(item["short"].get("pnl") or 0.0) for item in combo)
+    long_pnl = sum(float(item["long"].get("pnl") or 0.0) for item in combo)
+    short_return = short_pnl / initial_balance * 100.0 if initial_balance else 0.0
+    long_return = long_pnl / initial_balance * 100.0 if initial_balance else 0.0
+    short_trades = sum(int(item["short"].get("total_trades") or 0) for item in combo)
+    long_trades = sum(int(item["long"].get("total_trades") or 0) for item in combo)
+    avg_short_pf = sum(float(item["short"].get("profit_factor") or 0.0) for item in combo) / len(combo)
+    avg_long_pf = sum(float(item["long"].get("profit_factor") or 0.0) for item in combo) / len(combo)
+    dd = max(
+        max(float(item["short"].get("max_drawdown_pct") or 0.0) for item in combo),
+        max(float(item["long"].get("max_drawdown_pct") or 0.0) for item in combo),
+    )
+    short_gap = short_return - float(targets["min_short_return_pct"])
+    long_gap = long_return - float(targets["min_long_return_pct"])
     dd_penalty = max(0.0, dd - float(targets["max_drawdown_pct"])) * 6.0
-    trade_penalty = 0.0 if short["total_trades"] and long["total_trades"] else 5.0
+    trade_penalty = 0.0 if short_trades and long_trades else 5.0
+    passed = (
+        short_return >= float(targets["min_short_return_pct"])
+        and long_return >= float(targets["min_long_return_pct"])
+        and dd <= float(targets["max_drawdown_pct"])
+        and short_trades >= int(targets["min_short_trades"])
+        and long_trades >= int(targets["min_long_trades"])
+    )
     return (
         long_gap * 2.0
         + short_gap * 1.5
-        + min(float(long["profit_factor"]), 3.0) * 0.8
-        + min(float(short["profit_factor"]), 3.0) * 0.5
+        + min(avg_long_pf, 3.0) * 0.8
+        + min(avg_short_pf, 3.0) * 0.5
         - dd * 0.25
         - dd_penalty
         - trade_penalty
-        + (8.0 if status["passed"] else 0.0)
+        + (8.0 if passed else 0.0)
     )
 
 
