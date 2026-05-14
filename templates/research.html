@@ -6,7 +6,7 @@
 {% block content %}
 <header>
   <h1>Strategy Research</h1>
-  <p>Run structured evolution over deterministic strategy genomes with walk-forward validation.</p>
+  <p>Run structured evolution over deterministic strategy genomes with train, validation, untouched holdout, and cost-stress gates.</p>
 </header>
 <main>
   <section class="card">
@@ -38,8 +38,14 @@
     <div class="row">
       <label>Max DD % <input type="number" id="max-dd" min="0.5" max="50" step="0.5" value="{{ defaults.max_drawdown_pct }}" /></label>
       <label>Min PF <input type="number" id="min-pf" min="0.5" max="10" step="0.05" value="{{ defaults.min_profit_factor }}" /></label>
-      <label>Min Validation Trades <input type="number" id="min-trades" min="1" max="500" value="{{ defaults.min_validation_trades }}" /></label>
+      <label>Min Train PF <input type="number" id="min-train-pf" min="0.5" max="10" step="0.05" value="{{ defaults.min_train_profit_factor }}" /></label>
       <label>Risk / Trade % <input type="number" id="risk" min="0.05" max="5" step="0.05" value="{{ defaults.risk_per_trade_pct }}" /></label>
+    </div>
+    <div class="row">
+      <label>Min Validation Trades <input type="number" id="min-trades" min="1" max="500" value="{{ defaults.min_validation_trades }}" /></label>
+      <label>Holdout Days <input type="number" id="holdout-days" min="0" max="120" value="{{ defaults.holdout_days }}" /></label>
+      <label>Min Holdout Trades <input type="number" id="min-holdout-trades" min="1" max="500" value="{{ defaults.min_holdout_trades }}" /></label>
+      <label>Cost Stress x <input type="number" id="cost-stress" min="1" max="5" step="0.1" value="{{ defaults.cost_stress_multiplier }}" /></label>
       <div class="button-wrap" style="align-self:flex-end">
         <button type="button" id="start-btn">Start Research</button>
       </div>
@@ -78,11 +84,11 @@
           <th>Rank</th>
           <th>Status</th>
           <th>Score</th>
-          <th>Trades</th>
-          <th>Return</th>
-          <th>PF</th>
-          <th>Max DD</th>
-          <th>Worst Symbol</th>
+          <th>Train</th>
+          <th>Validation</th>
+          <th>Holdout</th>
+          <th>Stress</th>
+          <th>Reasons</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -117,6 +123,18 @@
     return `<span style="color:${c};font-weight:600">${v.toFixed(2)}%</span>`;
   }
 
+  function fmtMetric(m) {
+    if (!m || m.total_trades == null) return '--';
+    const dd = m.max_drawdown != null ? ` DD ${(m.max_drawdown * 100).toFixed(1)}%` : '';
+    const pf = m.profit_factor != null ? ` PF ${m.profit_factor.toFixed(2)}` : '';
+    return `${fmtPct(m.return_pct)}${pf}${dd}`;
+  }
+
+  function compactReasons(reasons) {
+    if (!reasons || !reasons.length) return '--';
+    return reasons.slice(0, 3).join(' ');
+  }
+
   async function loadRuns() {
     const resp = await fetch('/api/research/runs');
     const data = await resp.json();
@@ -129,7 +147,7 @@
     }
     runs.forEach(run => {
       const best = run.best || {};
-      const vm = best.validation_metrics || {};
+      const vm = best.holdout_metrics || best.validation_metrics || {};
       const row = document.createElement('tr');
       row.style.cursor = 'pointer';
       row.innerHTML = `
@@ -138,7 +156,7 @@
         <td>${badge(run.status)}</td>
         <td>${(run.symbols||[]).join(', ')}</td>
         <td>${run.timeframe}</td>
-        <td>${vm.total_trades != null ? `${fmtPct(vm.return_pct)} PF ${vm.profit_factor?.toFixed(2) ?? '--'} DD ${(vm.max_drawdown*100).toFixed(1)}%` : '--'}</td>
+        <td>${fmtMetric(vm)}</td>
         <td>${run.candidate_ruleset_id ? `<a href="/rulesets" onclick="event.stopPropagation()">#${run.candidate_ruleset_id}</a>` : '--'}</td>
         <td>${new Date(run.created_at).toLocaleString()}</td>
         <td><button onclick="event.stopPropagation();showRun(${run.id})">View</button>${run.status === 'running' ? ` <button onclick="event.stopPropagation();stopRun(${run.id})">Stop</button>` : ''}</td>
@@ -154,33 +172,39 @@
     if (data.error) { alert(data.error); return; }
     const run = data.run;
     const best = run.result?.best_candidate || {};
+    const tm = best.train_metrics || {};
     const vm = best.validation_metrics || {};
+    const hm = best.holdout_metrics || {};
+    const hsm = best.holdout_stress_metrics || best.validation_stress_metrics || {};
     document.getElementById('detail').style.display = '';
     document.getElementById('detail-title').textContent = `Run #${run.id}: ${run.name}`;
     document.getElementById('summary').innerHTML = `
       <div class="status-item"><span class="status-label">Status</span><span class="status-value">${badge(run.status)}</span></div>
-      <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${best.passed ? 'passed' : 'not passed'}</span></div>
-      <div class="status-item"><span class="status-label">Return</span><span class="status-value">${fmtPct(vm.return_pct)}</span></div>
-      <div class="status-item"><span class="status-label">Trades</span><span class="status-value">${vm.total_trades ?? '--'}</span></div>
-      <div class="status-item"><span class="status-label">PF</span><span class="status-value">${vm.profit_factor?.toFixed(2) ?? '--'}</span></div>
-      <div class="status-item"><span class="status-label">Max DD</span><span class="status-value">${vm.max_drawdown != null ? (vm.max_drawdown*100).toFixed(2)+'%' : '--'}</span></div>
+      <div class="status-item"><span class="status-label">Gate</span><span class="status-value">${best.passed ? 'passed' : 'not passed'}</span></div>
+      <div class="status-item"><span class="status-label">Train</span><span class="status-value">${fmtMetric(tm)}</span></div>
+      <div class="status-item"><span class="status-label">Validation</span><span class="status-value">${fmtMetric(vm)}</span></div>
+      <div class="status-item"><span class="status-label">Holdout</span><span class="status-value">${fmtMetric(hm)}</span></div>
+      <div class="status-item"><span class="status-label">Stress</span><span class="status-value">${fmtMetric(hsm)}</span></div>
       <div class="status-item"><span class="status-label">Ruleset</span><span class="status-value">${run.candidate_ruleset_id ? '#'+run.candidate_ruleset_id : '--'}</span></div>
     `;
 
     const tbody = document.querySelector('#candidates-table tbody');
     tbody.innerHTML = '';
     (data.candidates || []).forEach(c => {
+      const tm = c.train_metrics || {};
       const m = c.validation_metrics || {};
+      const hm = c.holdout_metrics || {};
+      const sm = c.holdout_stress_metrics || c.validation_stress_metrics || {};
       const row = document.createElement('tr');
       row.innerHTML = `
         <td>${c.rank}</td>
         <td>${c.passed ? '<span style="color:#27ae60;font-weight:600">passed</span>' : '<span style="color:#e74c3c">failed</span>'}</td>
         <td>${c.score?.toFixed(3) ?? '--'}</td>
-        <td>${m.total_trades ?? '--'}</td>
-        <td>${fmtPct(m.return_pct)}</td>
-        <td>${m.profit_factor?.toFixed(2) ?? '--'}</td>
-        <td>${m.max_drawdown != null ? (m.max_drawdown*100).toFixed(2)+'%' : '--'}</td>
-        <td>${fmtPct(m.worst_symbol_return_pct)}</td>
+        <td>${fmtMetric(tm)}</td>
+        <td>${fmtMetric(m)}</td>
+        <td>${fmtMetric(hm)}</td>
+        <td>${fmtMetric(sm)}</td>
+        <td class="small">${compactReasons(c.reasons)}</td>
       `;
       tbody.appendChild(row);
     });
@@ -229,7 +253,12 @@
         folds: parseInt(document.getElementById('folds').value) || 3,
         max_drawdown_pct: parseFloat(document.getElementById('max-dd').value) || 6,
         min_profit_factor: parseFloat(document.getElementById('min-pf').value) || 1.15,
+        min_train_profit_factor: parseFloat(document.getElementById('min-train-pf').value) || 1,
         min_validation_trades: parseInt(document.getElementById('min-trades').value) || 20,
+        holdout_enabled: true,
+        holdout_days: parseInt(document.getElementById('holdout-days').value) || 14,
+        min_holdout_trades: parseInt(document.getElementById('min-holdout-trades').value) || 20,
+        cost_stress_multiplier: parseFloat(document.getElementById('cost-stress').value) || 1.5,
         risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,
         ai_review: true,
       },

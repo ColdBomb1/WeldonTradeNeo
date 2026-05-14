@@ -11,7 +11,7 @@ from __future__ import annotations
 import copy
 import logging
 import random
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import load_config
@@ -32,15 +32,33 @@ DEFAULT_SETTINGS = {
     "validation_top_n": 5,
     "folds": 3,
     "initial_balance": 10000.0,
+    "spread_pips": 1.5,
     "risk_per_trade_pct": 0.35,
     "lot_type": "mini",
     "min_train_trades": 20,
+    "min_train_profit_factor": 1.0,
+    "min_train_return_pct": 0.0,
+    "min_train_profitable_test_ratio": 0.4,
     "min_validation_trades": 20,
     "max_drawdown_pct": 6.0,
     "min_profit_factor": 1.15,
     "min_return_pct": 0.25,
     "min_profitable_test_ratio": 0.5,
     "max_symbol_loss_pct": 3.0,
+    "holdout_enabled": True,
+    "holdout_days": 14,
+    "holdout_pct": 0.0,
+    "min_holdout_bars": 60,
+    "min_holdout_trades": 20,
+    "min_holdout_profit_factor": 1.15,
+    "min_holdout_return_pct": 0.1,
+    "min_holdout_profitable_test_ratio": 0.5,
+    "cost_stress_multiplier": 1.5,
+    "min_stress_profit_factor": 1.05,
+    "min_stress_return_pct": 0.0,
+    "min_positive_month_ratio": 0.45,
+    "max_month_loss_pct": 3.0,
+    "min_monthly_tests_for_gate": 3,
     "mutation_rate": 0.35,
     "seed": None,
     "ai_review": True,
@@ -95,12 +113,41 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["validation_top_n"] = max(1, min(settings["population_size"], int(settings["validation_top_n"])))
     settings["folds"] = max(1, min(8, int(settings["folds"])))
     settings["initial_balance"] = max(1000.0, float(settings["initial_balance"]))
+    settings["spread_pips"] = max(0.0, min(20.0, float(settings["spread_pips"])))
     settings["risk_per_trade_pct"] = max(0.05, min(5.0, float(settings["risk_per_trade_pct"])))
+    settings["min_train_trades"] = max(1, min(10000, int(settings["min_train_trades"])))
+    settings["min_train_profit_factor"] = max(0.1, min(10.0, float(settings["min_train_profit_factor"])))
+    settings["min_train_return_pct"] = max(-50.0, min(100.0, float(settings["min_train_return_pct"])))
+    settings["min_train_profitable_test_ratio"] = max(0.0, min(1.0, float(settings["min_train_profitable_test_ratio"])))
+    settings["min_validation_trades"] = max(1, min(10000, int(settings["min_validation_trades"])))
     settings["max_drawdown_pct"] = max(0.1, min(50.0, float(settings["max_drawdown_pct"])))
     settings["min_profit_factor"] = max(0.1, min(10.0, float(settings["min_profit_factor"])))
+    settings["min_return_pct"] = max(-50.0, min(100.0, float(settings["min_return_pct"])))
+    settings["min_profitable_test_ratio"] = max(0.0, min(1.0, float(settings["min_profitable_test_ratio"])))
+    settings["max_symbol_loss_pct"] = max(0.1, min(50.0, float(settings["max_symbol_loss_pct"])))
+    settings["holdout_enabled"] = _coerce_bool(settings["holdout_enabled"])
+    settings["holdout_days"] = max(0, min(120, int(settings["holdout_days"])))
+    settings["holdout_pct"] = max(0.0, min(50.0, float(settings["holdout_pct"])))
+    settings["min_holdout_bars"] = max(10, min(10000, int(settings["min_holdout_bars"])))
+    settings["min_holdout_trades"] = max(1, min(10000, int(settings["min_holdout_trades"])))
+    settings["min_holdout_profit_factor"] = max(0.1, min(10.0, float(settings["min_holdout_profit_factor"])))
+    settings["min_holdout_return_pct"] = max(-50.0, min(100.0, float(settings["min_holdout_return_pct"])))
+    settings["min_holdout_profitable_test_ratio"] = max(0.0, min(1.0, float(settings["min_holdout_profitable_test_ratio"])))
+    settings["cost_stress_multiplier"] = max(1.0, min(5.0, float(settings["cost_stress_multiplier"])))
+    settings["min_stress_profit_factor"] = max(0.1, min(10.0, float(settings["min_stress_profit_factor"])))
+    settings["min_stress_return_pct"] = max(-50.0, min(100.0, float(settings["min_stress_return_pct"])))
+    settings["min_positive_month_ratio"] = max(0.0, min(1.0, float(settings["min_positive_month_ratio"])))
+    settings["max_month_loss_pct"] = max(0.1, min(50.0, float(settings["max_month_loss_pct"])))
+    settings["min_monthly_tests_for_gate"] = max(1, min(1000, int(settings["min_monthly_tests_for_gate"])))
     settings["mutation_rate"] = max(0.01, min(1.0, float(settings["mutation_rate"])))
-    settings["ai_review"] = bool(settings["ai_review"])
+    settings["ai_review"] = _coerce_bool(settings["ai_review"])
     return settings
+
+
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off"}
+    return bool(value)
 
 
 def default_genome() -> dict:
@@ -122,17 +169,21 @@ def run_research(
     _active_research[run_id] = False
 
     windows = {
-        symbol: _build_windows(candles, settings["folds"])
+        symbol: _build_windows(candles, settings["folds"], settings)
         for symbol, candles in candles_by_symbol.items()
     }
     usable_symbols = [
         symbol for symbol, w in windows.items()
-        if w["train"] and w["validation"]
+        if w["train"] and w["validation"] and (not settings["holdout_enabled"] or w["holdout"])
     ]
     candles_by_symbol = {s: candles_by_symbol[s] for s in usable_symbols}
     windows = {s: windows[s] for s in usable_symbols}
     if not candles_by_symbol:
-        raise ValueError("Not enough candle data to build walk-forward windows")
+        raise ValueError("Not enough candle data to build train/validation/holdout windows")
+    split_summary = {
+        symbol: _window_summary(candles_by_symbol[symbol], windows[symbol])
+        for symbol in usable_symbols
+    }
 
     population = _initial_population(rng, settings["population_size"])
     generations: list[dict] = []
@@ -145,6 +196,7 @@ def run_research(
         "generation": 0,
         "generations": settings["generations"],
         "symbols": usable_symbols,
+        "split_summary": split_summary,
         "best_score": None,
         "best_metrics": None,
     }
@@ -214,17 +266,79 @@ def run_research(
     candidates = []
     for rank, item in enumerate(top_train, start=1):
         genome = item["genome"]
+        train_gate = score_train(item["train_metrics"], settings)
         validation = evaluate_genome(genome, candles_by_symbol, windows, "validation", timeframe, settings)
-        gate = score_validation(validation, settings)
+        validation_gate = score_validation(validation, settings)
+        stress_multiplier = float(settings["cost_stress_multiplier"])
+        validation_stress = None
+        validation_stress_gate = {"passed": True, "status": "passed", "reasons": []}
+        if stress_multiplier > 1.0:
+            validation_stress = evaluate_genome(
+                genome,
+                candles_by_symbol,
+                windows,
+                "validation",
+                timeframe,
+                settings,
+                spread_multiplier=stress_multiplier,
+            )
+            validation_stress_gate = score_cost_stress(validation_stress, settings, "Validation stress")
+
+        holdout = None
+        holdout_gate = {"passed": True, "status": "passed", "reasons": []}
+        holdout_stress = None
+        holdout_stress_gate = {"passed": True, "status": "passed", "reasons": []}
+        if settings["holdout_enabled"]:
+            if any(w["holdout"] for w in windows.values()):
+                holdout = evaluate_genome(genome, candles_by_symbol, windows, "holdout", timeframe, settings)
+                holdout_gate = score_holdout(holdout, settings)
+                if stress_multiplier > 1.0:
+                    holdout_stress = evaluate_genome(
+                        genome,
+                        candles_by_symbol,
+                        windows,
+                        "holdout",
+                        timeframe,
+                        settings,
+                        spread_multiplier=stress_multiplier,
+                    )
+                    holdout_stress_gate = score_cost_stress(holdout_stress, settings, "Holdout stress")
+            else:
+                holdout_gate = {
+                    "passed": False,
+                    "status": "failed",
+                    "reasons": ["Holdout enabled but no holdout windows were available."],
+                }
+
+        gates = {
+            "train": train_gate,
+            "validation": validation_gate,
+            "validation_stress": validation_stress_gate,
+            "holdout": holdout_gate,
+            "holdout_stress": holdout_stress_gate,
+        }
+        reasons = _collect_gate_reasons(gates)
+        passed = not reasons
+        selection_score = _candidate_selection_score(
+            train=item["train_metrics"],
+            validation=validation,
+            validation_stress=validation_stress,
+            holdout=holdout,
+            holdout_stress=holdout_stress,
+        )
         candidates.append({
             "rank": rank,
             "generation": settings["generations"],
             "genome": genome,
             "train_metrics": item["train_metrics"],
             "validation_metrics": validation,
-            "score": validation["score"],
-            "passed": gate["passed"],
-            "reasons": gate["reasons"],
+            "validation_stress_metrics": validation_stress,
+            "holdout_metrics": holdout,
+            "holdout_stress_metrics": holdout_stress,
+            "gates": gates,
+            "score": selection_score,
+            "passed": passed,
+            "reasons": reasons,
         })
 
     candidates.sort(key=lambda item: (item["passed"], item["score"]), reverse=True)
@@ -236,6 +350,7 @@ def run_research(
         "timeframe": timeframe,
         "symbols": usable_symbols,
         "settings": settings,
+        "split_summary": split_summary,
         "generations": generations,
         "top_candidates": candidates,
         "best_candidate": candidates[0] if candidates else None,
@@ -245,7 +360,12 @@ def run_research(
         "status": result["status"],
         "generation": len(generations),
         "best_score": candidates[0]["score"] if candidates else None,
-        "best_metrics": candidates[0]["validation_metrics"] if candidates else None,
+        "best_metrics": (
+            candidates[0].get("holdout_metrics")
+            or candidates[0].get("validation_metrics")
+            if candidates
+            else None
+        ),
         "passed": candidates[0]["passed"] if candidates else False,
     })
     _active_research.pop(run_id, None)
@@ -259,12 +379,14 @@ def evaluate_genome(
     split: str,
     timeframe: str,
     settings: dict,
+    spread_multiplier: float = 1.0,
 ) -> dict:
     results: list[tuple[str, BacktestResults]] = []
+    min_bars = 40 if split == "holdout" else 80
     for symbol, candles in candles_by_symbol.items():
         for start, end in windows_by_symbol[symbol][split]:
             window_candles = candles[start:end]
-            if len(window_candles) < 80:
+            if len(window_candles) < min_bars:
                 continue
             config = BacktestConfig(
                 symbol=symbol,
@@ -274,6 +396,7 @@ def evaluate_genome(
                 start_date=_parse_dt(window_candles[0]["time"]),
                 end_date=_parse_dt(window_candles[-1]["time"]),
                 initial_balance=settings["initial_balance"],
+                spread_pips=float(settings["spread_pips"]) * spread_multiplier,
                 pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
                 lot_type=settings["lot_type"],
                 risk_per_trade_pct=settings["risk_per_trade_pct"],
@@ -298,6 +421,11 @@ def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict
             "sharpe_ratio": 0.0,
             "profitable_test_ratio": 0.0,
             "worst_symbol_return_pct": -100.0,
+            "expectancy": 0.0,
+            "avg_trades_per_test": 0.0,
+            "months": 0,
+            "positive_month_ratio": 0.0,
+            "worst_month_pct": -100.0,
             "per_symbol": {},
         }
 
@@ -307,6 +435,7 @@ def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict
     drawdown = 0.0
     sharpes = []
     profitable_tests = 0
+    monthly_returns = []
     per_symbol: dict[str, dict] = {}
 
     for symbol, result in results:
@@ -317,6 +446,7 @@ def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict
         sharpes.append(result.sharpe_ratio)
         if pnl > 0:
             profitable_tests += 1
+        monthly_returns.extend(float(m.get("pct", 0.0)) for m in result.monthly_pnl)
         bucket = per_symbol.setdefault(symbol, {"tests": 0, "trades": 0, "pnl": 0.0})
         bucket["tests"] += 1
         bucket["trades"] += result.total_trades
@@ -329,6 +459,12 @@ def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
     return_pct = total_pnl / (initial * len(results)) * 100.0
     profitable_ratio = profitable_tests / len(results)
+    positive_month_ratio = (
+        sum(1 for value in monthly_returns if value > 0) / len(monthly_returns)
+        if monthly_returns
+        else 0.0
+    )
+    worst_month_pct = min(monthly_returns) if monthly_returns else 0.0
     for symbol, bucket in per_symbol.items():
         bucket["return_pct"] = bucket["pnl"] / (initial * bucket["tests"]) * 100.0
         bucket["pnl"] = round(bucket["pnl"], 2)
@@ -357,25 +493,128 @@ def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict
         "sharpe_ratio": round(sum(sharpes) / len(sharpes), 4) if sharpes else 0.0,
         "profitable_test_ratio": round(profitable_ratio, 3),
         "worst_symbol_return_pct": round(worst_symbol_return, 3),
+        "expectancy": round(total_pnl / total_trades, 2) if total_trades else 0.0,
+        "avg_trades_per_test": round(total_trades / len(results), 2),
+        "months": len(monthly_returns),
+        "positive_month_ratio": round(positive_month_ratio, 3),
+        "worst_month_pct": round(worst_month_pct, 3),
         "per_symbol": per_symbol,
     }
 
 
+def score_train(metrics: dict, settings: dict) -> dict:
+    return _score_split(
+        "Train",
+        metrics,
+        settings,
+        min_trades=int(settings["min_train_trades"]),
+        min_profit_factor=float(settings["min_train_profit_factor"]),
+        min_return_pct=float(settings["min_train_return_pct"]),
+        min_profitable_test_ratio=float(settings["min_train_profitable_test_ratio"]),
+    )
+
+
 def score_validation(metrics: dict, settings: dict) -> dict:
+    return _score_split(
+        "Validation",
+        metrics,
+        settings,
+        min_trades=int(settings["min_validation_trades"]),
+        min_profit_factor=float(settings["min_profit_factor"]),
+        min_return_pct=float(settings["min_return_pct"]),
+        min_profitable_test_ratio=float(settings["min_profitable_test_ratio"]),
+    )
+
+
+def score_holdout(metrics: dict, settings: dict) -> dict:
+    return _score_split(
+        "Holdout",
+        metrics,
+        settings,
+        min_trades=int(settings["min_holdout_trades"]),
+        min_profit_factor=float(settings["min_holdout_profit_factor"]),
+        min_return_pct=float(settings["min_holdout_return_pct"]),
+        min_profitable_test_ratio=float(settings["min_holdout_profitable_test_ratio"]),
+    )
+
+
+def score_cost_stress(metrics: dict, settings: dict, label: str) -> dict:
     reasons = []
-    if metrics["total_trades"] < int(settings["min_validation_trades"]):
-        reasons.append(f"Validation trades {metrics['total_trades']} below {settings['min_validation_trades']}.")
     if metrics["max_drawdown"] > float(settings["max_drawdown_pct"]) / 100.0:
-        reasons.append(f"Drawdown {metrics['max_drawdown'] * 100:.2f}% exceeds {settings['max_drawdown_pct']:.2f}%.")
-    if metrics["profit_factor"] < float(settings["min_profit_factor"]):
-        reasons.append(f"Profit factor {metrics['profit_factor']:.2f} below {settings['min_profit_factor']:.2f}.")
-    if metrics["return_pct"] < float(settings["min_return_pct"]):
-        reasons.append(f"Return {metrics['return_pct']:.2f}% below {settings['min_return_pct']:.2f}%.")
-    if metrics["profitable_test_ratio"] < float(settings["min_profitable_test_ratio"]):
-        reasons.append(f"Profitable test ratio {metrics['profitable_test_ratio']:.2f} below {settings['min_profitable_test_ratio']:.2f}.")
+        reasons.append(f"{label} drawdown {metrics['max_drawdown'] * 100:.2f}% exceeds {settings['max_drawdown_pct']:.2f}%.")
+    if metrics["profit_factor"] < float(settings["min_stress_profit_factor"]):
+        reasons.append(f"{label} PF {metrics['profit_factor']:.2f} below {settings['min_stress_profit_factor']:.2f}.")
+    if metrics["return_pct"] < float(settings["min_stress_return_pct"]):
+        reasons.append(f"{label} return {metrics['return_pct']:.2f}% below {settings['min_stress_return_pct']:.2f}%.")
     if metrics["worst_symbol_return_pct"] < -float(settings["max_symbol_loss_pct"]):
-        reasons.append(f"Worst symbol return {metrics['worst_symbol_return_pct']:.2f}% breaches -{settings['max_symbol_loss_pct']:.2f}%.")
+        reasons.append(f"{label} worst symbol {metrics['worst_symbol_return_pct']:.2f}% breaches -{settings['max_symbol_loss_pct']:.2f}%.")
     return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
+
+
+def _score_split(
+    label: str,
+    metrics: dict,
+    settings: dict,
+    *,
+    min_trades: int,
+    min_profit_factor: float,
+    min_return_pct: float,
+    min_profitable_test_ratio: float,
+) -> dict:
+    reasons = []
+    if metrics["total_trades"] < min_trades:
+        reasons.append(f"{label} trades {metrics['total_trades']} below {min_trades}.")
+    if metrics["max_drawdown"] > float(settings["max_drawdown_pct"]) / 100.0:
+        reasons.append(f"{label} drawdown {metrics['max_drawdown'] * 100:.2f}% exceeds {settings['max_drawdown_pct']:.2f}%.")
+    if metrics["profit_factor"] < min_profit_factor:
+        reasons.append(f"{label} PF {metrics['profit_factor']:.2f} below {min_profit_factor:.2f}.")
+    if metrics["return_pct"] < min_return_pct:
+        reasons.append(f"{label} return {metrics['return_pct']:.2f}% below {min_return_pct:.2f}%.")
+    if metrics["profitable_test_ratio"] < min_profitable_test_ratio:
+        reasons.append(f"{label} profitable test ratio {metrics['profitable_test_ratio']:.2f} below {min_profitable_test_ratio:.2f}.")
+    if metrics["worst_symbol_return_pct"] < -float(settings["max_symbol_loss_pct"]):
+        reasons.append(f"{label} worst symbol {metrics['worst_symbol_return_pct']:.2f}% breaches -{settings['max_symbol_loss_pct']:.2f}%.")
+    if int(metrics.get("months") or 0) >= int(settings["min_monthly_tests_for_gate"]):
+        if metrics.get("positive_month_ratio", 0.0) < float(settings["min_positive_month_ratio"]):
+            reasons.append(
+                f"{label} positive month ratio {metrics['positive_month_ratio']:.2f} below "
+                f"{settings['min_positive_month_ratio']:.2f}."
+            )
+        if metrics.get("worst_month_pct", 0.0) < -float(settings["max_month_loss_pct"]):
+            reasons.append(
+                f"{label} worst month {metrics['worst_month_pct']:.2f}% breaches "
+                f"-{settings['max_month_loss_pct']:.2f}%."
+            )
+    return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
+
+
+def _collect_gate_reasons(gates: dict[str, dict]) -> list[str]:
+    reasons: list[str] = []
+    for gate in gates.values():
+        reasons.extend(gate.get("reasons") or [])
+    return reasons
+
+
+def _candidate_selection_score(
+    *,
+    train: dict,
+    validation: dict,
+    validation_stress: dict | None,
+    holdout: dict | None,
+    holdout_stress: dict | None,
+) -> float:
+    weighted_score = train.get("score", 0.0) * 0.20 + validation.get("score", 0.0) * 0.35
+    weight = 0.55
+    if holdout:
+        weighted_score += holdout.get("score", 0.0) * 0.45
+        weight += 0.45
+    if validation_stress:
+        weighted_score += validation_stress.get("score", 0.0) * 0.15
+        weight += 0.15
+    if holdout_stress:
+        weighted_score += holdout_stress.get("score", 0.0) * 0.25
+        weight += 0.25
+    return round(weighted_score / weight, 4)
 
 
 def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float) -> dict:
@@ -429,28 +668,77 @@ def _initial_population(rng: random.Random, size: int) -> list[dict]:
     return population
 
 
-def _build_windows(candles: list[dict], folds: int) -> dict[str, list[tuple[int, int]]]:
+def _build_windows(candles: list[dict], folds: int, settings: dict | None = None) -> dict[str, list[tuple[int, int]]]:
+    settings = settings or DEFAULT_SETTINGS
     n = len(candles)
     min_train = 180
     min_val = 80
-    if n < min_train + min_val:
-        return {"train": [], "validation": []}
+    min_holdout = int(settings.get("min_holdout_bars", 60))
+    holdout: list[tuple[int, int]] = []
+    research_end = n
+
+    if settings.get("holdout_enabled", True):
+        holdout_start = _find_holdout_start(candles, settings)
+        if holdout_start is None or n - holdout_start < min_holdout:
+            return {"train": [], "validation": [], "holdout": []}
+        holdout = [(holdout_start, n)]
+        research_end = holdout_start
+
+    if research_end < min_train + min_val:
+        return {"train": [], "validation": [], "holdout": holdout}
     folds = max(1, min(folds, 5))
-    seg = n // (folds + 1)
+    seg = research_end // (folds + 1)
     train = []
     validation = []
     for idx in range(folds):
         train_end = seg * (idx + 1)
         val_start = train_end
-        val_end = seg * (idx + 2) if idx < folds - 1 else n
+        val_end = seg * (idx + 2) if idx < folds - 1 else research_end
         if train_end >= min_train and val_end - val_start >= min_val:
             train.append((0, train_end))
             validation.append((val_start, val_end))
     if not train:
-        split = int(n * 0.7)
+        split = int(research_end * 0.7)
         train = [(0, split)]
-        validation = [(split, n)]
-    return {"train": train, "validation": validation}
+        validation = [(split, research_end)]
+    return {"train": train, "validation": validation, "holdout": holdout}
+
+
+def _find_holdout_start(candles: list[dict], settings: dict) -> int | None:
+    if not candles:
+        return None
+
+    holdout_days = int(settings.get("holdout_days") or 0)
+    if holdout_days > 0:
+        try:
+            cutoff = _parse_dt(candles[-1]["time"]) - timedelta(days=holdout_days)
+            for idx, candle in enumerate(candles):
+                if _parse_dt(candle["time"]) >= cutoff:
+                    return idx
+        except Exception:
+            logger.warning("Unable to build date-based holdout; falling back to percent split", exc_info=True)
+
+    holdout_pct = float(settings.get("holdout_pct") or 0.0)
+    if holdout_pct > 0:
+        holdout_bars = max(int(settings.get("min_holdout_bars", 60)), int(len(candles) * holdout_pct / 100.0))
+        return max(0, len(candles) - holdout_bars)
+
+    return None
+
+
+def _window_summary(candles: list[dict], windows: dict[str, list[tuple[int, int]]]) -> dict:
+    summary: dict[str, list[dict]] = {}
+    for split, ranges in windows.items():
+        summary[split] = []
+        for start, end in ranges:
+            if start < 0 or end > len(candles) or start >= end:
+                continue
+            summary[split].append({
+                "start": candles[start]["time"],
+                "end": candles[end - 1]["time"],
+                "bars": end - start,
+            })
+    return summary
 
 
 def _fitness_score(
@@ -469,6 +757,8 @@ def _fitness_score(
     dd_penalty = max(0.0, dd_pct - float(settings["max_drawdown_pct"])) * 2.0
     worst_symbol_penalty = max(0.0, -float(worst_symbol_return) - float(settings["max_symbol_loss_pct"])) * 1.5
     pf_component = min(profit_factor, 4.0) * 1.5
+    pf_shortfall_penalty = max(0.0, float(settings["min_profit_factor"]) - profit_factor) * 4.0
+    negative_return_penalty = max(0.0, -return_pct) * 1.5
     return (
         return_pct * 1.2
         + pf_component
@@ -478,6 +768,8 @@ def _fitness_score(
         - low_trade_penalty
         - dd_penalty
         - worst_symbol_penalty
+        - pf_shortfall_penalty
+        - negative_return_penalty
     )
 
 
@@ -519,9 +811,14 @@ def _ai_review(result: dict) -> dict | None:
             "reasons": result["best_candidate"].get("reasons", []),
             "train_metrics": result["best_candidate"]["train_metrics"],
             "validation_metrics": result["best_candidate"]["validation_metrics"],
+            "validation_stress_metrics": result["best_candidate"].get("validation_stress_metrics"),
+            "holdout_metrics": result["best_candidate"].get("holdout_metrics"),
+            "holdout_stress_metrics": result["best_candidate"].get("holdout_stress_metrics"),
+            "gates": result["best_candidate"].get("gates", {}),
             "genome": result["best_candidate"]["genome"],
         },
         "settings": result["settings"],
+        "split_summary": result.get("split_summary", {}),
     }
     return ai_service.generate_json(
         system=(

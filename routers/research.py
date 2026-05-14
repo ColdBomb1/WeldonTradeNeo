@@ -75,6 +75,10 @@ def get_research_run(run_id: int) -> JSONResponse:
             .order_by(ResearchCandidate.rank.asc())
             .all()
         )
+        result_candidates = {
+            int(item.get("rank") or 0): item
+            for item in ((run.result or {}).get("top_candidates") or [])
+        }
         return JSONResponse({
             "run": {
                 "id": run.id,
@@ -98,6 +102,11 @@ def get_research_run(run_id: int) -> JSONResponse:
                     "genome": c.genome,
                     "train_metrics": c.train_metrics,
                     "validation_metrics": c.validation_metrics,
+                    "validation_stress_metrics": result_candidates.get(c.rank, {}).get("validation_stress_metrics"),
+                    "holdout_metrics": result_candidates.get(c.rank, {}).get("holdout_metrics"),
+                    "holdout_stress_metrics": result_candidates.get(c.rank, {}).get("holdout_stress_metrics"),
+                    "gates": result_candidates.get(c.rank, {}).get("gates"),
+                    "reasons": result_candidates.get(c.rank, {}).get("reasons", []),
                     "score": c.score,
                     "passed": c.passed,
                     "ruleset_id": c.ruleset_id,
@@ -238,10 +247,17 @@ def _persist_result(run_id: int, result: dict) -> None:
                 "status": "passed" if best.get("passed") else "failed",
                 "passed": bool(best.get("passed")),
                 "validated_at": now.isoformat(),
-                "method": "walk_forward_research",
+                "method": "walk_forward_train_validation_holdout_research",
                 "criteria": result.get("settings", {}),
                 "reasons": best.get("reasons", []),
-                "metrics": best.get("validation_metrics"),
+                "gates": best.get("gates", {}),
+                "metrics": {
+                    "train": best.get("train_metrics"),
+                    "validation": best.get("validation_metrics"),
+                    "validation_stress": best.get("validation_stress_metrics"),
+                    "holdout": best.get("holdout_metrics"),
+                    "holdout_stress": best.get("holdout_stress_metrics"),
+                },
             }
             genome = best.get("genome") or {}
             rs = RuleSet(
@@ -260,11 +276,17 @@ def _persist_result(run_id: int, result: dict) -> None:
                 timeframes=[result.get("timeframe") or run.timeframe],
                 version=1,
                 performance_metrics={
-                    **(best.get("validation_metrics") or {}),
+                    **(best.get("holdout_metrics") or best.get("validation_metrics") or {}),
                     "train_metrics": best.get("train_metrics"),
+                    "validation_metrics": best.get("validation_metrics"),
+                    "validation_stress_metrics": best.get("validation_stress_metrics"),
+                    "holdout_metrics": best.get("holdout_metrics"),
+                    "holdout_stress_metrics": best.get("holdout_stress_metrics"),
+                    "gates": best.get("gates", {}),
+                    "failure_reasons": best.get("reasons", []),
                     "validated": validation["passed"],
                     "validation_status": validation["status"],
-                    "selection_basis": "walk_forward_validation",
+                    "selection_basis": "train_validation_holdout_cost_stress",
                     "research_run_id": run_id,
                 },
                 created_at=now,
