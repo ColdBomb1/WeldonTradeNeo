@@ -23,6 +23,18 @@ from services import indicator_service
 from services.strategy_service import SignalType, get_strategy
 
 LOT_UNITS = {"micro": 1000, "mini": 10000, "standard": 100000}
+MAX_SL_PIPS = {
+    "EURUSD": 15, "GBPUSD": 20, "USDJPY": 25,
+    "USDCHF": 15, "AUDUSD": 18, "NZDUSD": 20, "USDCAD": 18,
+}
+MAX_TP_PIPS = {
+    "EURUSD": 25, "GBPUSD": 35, "USDJPY": 40,
+    "USDCHF": 25, "AUDUSD": 30, "NZDUSD": 35, "USDCAD": 30,
+}
+MAX_LOTS = {
+    "EURUSD": 3.0, "GBPUSD": 2.25, "USDJPY": 2.86,
+    "USDCHF": 2.5, "AUDUSD": 2.25, "NZDUSD": 2.25, "USDCAD": 3.5,
+}
 
 
 @dataclass
@@ -45,6 +57,11 @@ class BacktestConfig:
     tp_atr_multiplier: float = 2.0  # TP distance = ATR * multiplier
     max_open_positions: int = 1  # for future multi-position support
     monthly_max_loss_pct: float = 7.0  # circuit breaker: stop if month DD exceeds this
+    entry_timing: str = "signal_close"  # "signal_close" | "next_open"
+    slippage_pips: float = 0.0
+    min_sl_pips: float = 0.0
+    enforce_live_exit_policy: bool = False
+    min_reward_risk: float = 1.5
 
     # Legacy field for backward compatibility with optimizer
     position_size_pct: float = 1.0
@@ -137,11 +154,97 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
 
     # Precompute ATR for SL/TP placement
     atr_values = indicator_service.atr(candles, config.sl_atr_period)
+    entry_timing = config.entry_timing if config.entry_timing in {"signal_close", "next_open"} else "signal_close"
+    slippage = max(0.0, float(config.slippage_pips)) * config.pip_value
+
+    def _entry_price(raw_price: float, side: SignalType) -> float:
+        if side == SignalType.BUY:
+            return raw_price + slippage
+        if side == SignalType.SELL:
+            return raw_price - slippage
+        return raw_price
+
+    def _exit_price(raw_price: float, side: str) -> float:
+        if side == "buy":
+            return raw_price - slippage
+        if side == "sell":
+            return raw_price + slippage
+        return raw_price
+
+    def _build_position(signal, raw_entry_price: float, entry_time: str, atr_index: int) -> _Position:
+        entry_price = _entry_price(raw_entry_price, signal.type)
+        signal_price = float(signal.price or raw_entry_price)
+        cur_atr = atr_values[atr_index] if atr_index < len(atr_values) else None
+
+        if cur_atr is not None and cur_atr > 0:
+            sl_distance = cur_atr * config.sl_atr_multiplier
+            tp_distance = cur_atr * config.tp_atr_multiplier
+        else:
+            sl_distance = config.spread_pips * config.pip_value * 20
+            tp_distance = config.spread_pips * config.pip_value * 30
+
+        if signal.stop_loss is not None:
+            sl_distance = abs(signal_price - signal.stop_loss)
+        if signal.take_profit is not None:
+            tp_distance = abs(signal_price - signal.take_profit)
+
+        if signal.type == SignalType.BUY:
+            stop_loss = entry_price - sl_distance
+            take_profit = entry_price + tp_distance
+        else:
+            stop_loss = entry_price + sl_distance
+            take_profit = entry_price - tp_distance
+
+        sizing_sl_distance = abs(entry_price - stop_loss)
+        if config.enforce_live_exit_policy:
+            risk_dist = abs(entry_price - stop_loss)
+            reward_dist = abs(entry_price - take_profit)
+            if risk_dist > 0 and reward_dist < float(config.min_reward_risk) * risk_dist:
+                take_profit = (
+                    entry_price + float(config.min_reward_risk) * risk_dist
+                    if signal.type == SignalType.BUY
+                    else entry_price - float(config.min_reward_risk) * risk_dist
+                )
+
+            pip_val = config.pip_value
+            sl_cap = MAX_SL_PIPS.get(config.symbol.upper(), 20) * pip_val
+            tp_cap = MAX_TP_PIPS.get(config.symbol.upper(), 30) * pip_val
+            if abs(entry_price - stop_loss) > sl_cap:
+                stop_loss = entry_price - sl_cap if signal.type == SignalType.BUY else entry_price + sl_cap
+            if abs(entry_price - take_profit) > tp_cap:
+                take_profit = entry_price + tp_cap if signal.type == SignalType.BUY else entry_price - tp_cap
+
+        sl_distance = sizing_sl_distance if config.enforce_live_exit_policy else abs(entry_price - stop_loss)
+        sl_pips = sl_distance / config.pip_value
+        if sl_pips <= 0:
+            sl_pips = 1.0
+        if config.enforce_live_exit_policy:
+            sl_pips = max(sl_pips, 10.0)
+        sl_pips = max(sl_pips, float(config.min_sl_pips))
+
+        risk_amount = balance * (config.risk_per_trade_pct / 100.0)
+        pip_value_per_lot = config.pip_value * lot_units
+        volume_lots = risk_amount / (sl_pips * pip_value_per_lot)
+        if config.enforce_live_exit_policy:
+            if "JPY" in config.symbol.upper():
+                volume_lots *= 159.0 / 2
+            volume_lots = min(volume_lots, MAX_LOTS.get(config.symbol.upper(), 3.0))
+        volume_lots = max(round(volume_lots, 2), 0.01)
+
+        return _Position(
+            side=signal.type.value,
+            entry_price=entry_price,
+            entry_ts=entry_time,
+            volume=volume_lots,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+        )
 
     # Monthly tracking
     monthly_start_balance: dict[str, float] = {}  # month -> balance at start
     monthly_trades: dict[str, list] = {}
     month_stopped: set[str] = set()  # months where circuit breaker triggered
+    pending_entry: tuple[object, int] | None = None
 
     for i in range(1, len(candles)):
         current = candles[i]
@@ -153,6 +256,12 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
         if current_month not in monthly_start_balance:
             monthly_start_balance[current_month] = balance
             monthly_trades[current_month] = []
+
+        if entry_timing == "next_open" and pending_entry is not None and position is None:
+            if current_month not in month_stopped and balance > 0:
+                pending_signal, signal_index = pending_entry
+                position = _build_position(pending_signal, current["open"], bar_time, signal_index)
+            pending_entry = None
 
         # Strategy signal
         if use_fast_path:
@@ -168,24 +277,24 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
             # Check SL hit (worst-case: check SL before TP)
             if position.side == "buy":
                 if current["low"] <= position.stop_loss:
-                    exit_price = position.stop_loss
+                    exit_price = _exit_price(position.stop_loss, position.side)
                     exit_type = "sl"
                 elif current["high"] >= position.take_profit:
-                    exit_price = position.take_profit
+                    exit_price = _exit_price(position.take_profit, position.side)
                     exit_type = "tp"
             else:  # sell
                 if current["high"] >= position.stop_loss:
-                    exit_price = position.stop_loss
+                    exit_price = _exit_price(position.stop_loss, position.side)
                     exit_type = "sl"
                 elif current["low"] <= position.take_profit:
-                    exit_price = position.take_profit
+                    exit_price = _exit_price(position.take_profit, position.side)
                     exit_type = "tp"
 
             # Close on opposing signal (if SL/TP didn't trigger)
             if exit_price is None:
                 if (position.side == "buy" and signal.type == SignalType.SELL) or \
                    (position.side == "sell" and signal.type == SignalType.BUY):
-                    exit_price = current_price
+                    exit_price = _exit_price(current_price, position.side)
                     exit_type = "signal"
 
             if exit_price is not None:
@@ -226,49 +335,10 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
         )
 
         if can_open:
-            cur_atr = atr_values[i] if i < len(atr_values) else None
-
-            if cur_atr is not None and cur_atr > 0:
-                sl_distance = cur_atr * config.sl_atr_multiplier
-                tp_distance = cur_atr * config.tp_atr_multiplier
+            if entry_timing == "next_open":
+                pending_entry = (signal, i)
             else:
-                # Fallback: use spread-based defaults when ATR not available
-                sl_distance = config.spread_pips * config.pip_value * 20
-                tp_distance = config.spread_pips * config.pip_value * 30
-
-            # Compute SL/TP prices
-            if signal.type == SignalType.BUY:
-                stop_loss = current_price - sl_distance
-                take_profit = current_price + tp_distance
-            else:
-                stop_loss = current_price + sl_distance
-                take_profit = current_price - tp_distance
-
-            # Use signal-provided SL/TP if available
-            if signal.stop_loss is not None:
-                stop_loss = signal.stop_loss
-                sl_distance = abs(current_price - stop_loss)
-            if signal.take_profit is not None:
-                take_profit = signal.take_profit
-
-            # Position sizing: risk_amount / (SL distance in pips * pip value per lot)
-            sl_pips = sl_distance / config.pip_value
-            if sl_pips <= 0:
-                sl_pips = 1.0  # minimum 1 pip SL
-
-            risk_amount = balance * (config.risk_per_trade_pct / 100.0)
-            pip_value_per_lot = config.pip_value * lot_units
-            volume_lots = risk_amount / (sl_pips * pip_value_per_lot)
-            volume_lots = max(round(volume_lots, 2), 0.01)  # minimum 0.01 lot
-
-            position = _Position(
-                side=signal.type.value,
-                entry_price=current_price,
-                entry_ts=bar_time,
-                volume=volume_lots,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-            )
+                position = _build_position(signal, current_price, bar_time, i)
 
         # --- Track equity ---
         equity = balance
@@ -290,7 +360,7 @@ def run_backtest(config: BacktestConfig, candles: List[dict]) -> BacktestResults
     # Close any remaining position at last price
     if position is not None and candles:
         last = candles[-1]
-        exit_price = last["close"]
+        exit_price = _exit_price(last["close"], position.side)
         pnl = _compute_pnl(
             position.side, position.entry_price, exit_price,
             position.volume, lot_units, spread_cost, "end",

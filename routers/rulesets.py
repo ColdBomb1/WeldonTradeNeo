@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -128,7 +128,7 @@ def _validation_criteria(payload: dict, rs: RuleSet, initial_balance: float) -> 
         "max_drawdown": float(payload.get("max_drawdown_pct") or default_dd_pct) / 100.0,
         "min_profit_factor": float(payload.get("min_profit_factor") or 1.15),
         "min_sharpe": float(payload.get("min_sharpe") or 0.0),
-        "require_profit": bool(payload.get("require_profit", True)),
+        "require_profit": _coerce_bool(payload.get("require_profit"), True),
         "initial_balance": initial_balance,
     }
 
@@ -255,6 +255,63 @@ def _mark_validation_stale(rs: RuleSet, reason: str) -> None:
         rs.status = "candidate"
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "no", "off", ""}
+    return bool(value)
+
+
+def _parse_dt(value) -> datetime:
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def _combine_equity_curves(
+    curves_by_key: dict[str, list[dict]],
+    starting_balance_by_key: dict[str, float],
+    initial_balance: float,
+) -> list[dict]:
+    times = sorted({point["time"] for curve in curves_by_key.values() for point in curve})
+    last_equity = {
+        key: float(starting_balance_by_key.get(key, initial_balance))
+        for key in curves_by_key
+    }
+    index_by_key = {key: 0 for key in curves_by_key}
+    combined = []
+    for ts in times:
+        for key, curve in curves_by_key.items():
+            idx = index_by_key[key]
+            while idx < len(curve) and curve[idx]["time"] <= ts:
+                last_equity[key] = float(curve[idx]["equity"])
+                idx += 1
+            index_by_key[key] = idx
+        equity = initial_balance + sum(
+            equity - float(starting_balance_by_key.get(key, initial_balance))
+            for key, equity in last_equity.items()
+        )
+        combined.append({"time": ts, "equity": round(equity, 2)})
+    return combined
+
+
+def _max_drawdown_from_curve(equity_curve: list[dict]) -> float:
+    peak = None
+    max_drawdown = 0.0
+    for point in equity_curve:
+        equity = float(point.get("equity") or 0.0)
+        if peak is None or equity > peak:
+            peak = equity
+        if peak and peak > 0:
+            max_drawdown = max(max_drawdown, (peak - equity) / peak)
+    return round(max_drawdown, 4)
+
+
 @router.get("/rulesets")
 def rulesets_page(request: Request):
     cfg = load_config()
@@ -275,6 +332,184 @@ def get_rulesets() -> JSONResponse:
     try:
         rows = session.query(RuleSet).order_by(RuleSet.updated_at.desc()).all()
         return JSONResponse({"rulesets": [_ruleset_to_dict(r) for r in rows]})
+    finally:
+        session.close()
+
+
+@router.post("/api/rulesets/portfolio/backtest")
+async def backtest_active_portfolio(request: Request) -> JSONResponse:
+    payload = await request.json()
+    days = max(1, min(120, int(payload.get("days") or 14)))
+    initial_balance = float(payload.get("initial_balance") or load_config().training.initial_balance)
+    realistic = _coerce_bool(payload.get("realistic"), True)
+    entry_timing = payload.get("entry_timing") or ("next_open" if realistic else "signal_close")
+    slippage_pips = float(payload.get("slippage_pips") if payload.get("slippage_pips") is not None else (0.2 if realistic else 0.0))
+    min_sl_pips = float(payload.get("min_sl_pips") if payload.get("min_sl_pips") is not None else (10.0 if realistic else 0.0))
+    enforce_live_exit_policy = _coerce_bool(payload.get("enforce_live_exit_policy"), realistic)
+
+    session = get_session()
+    try:
+        active = session.query(RuleSet).filter(RuleSet.status == "active").order_by(RuleSet.id.asc()).all()
+        scopes = []
+        for rs in active:
+            params = rs.parameters or {}
+            schema = params.get("strategy_schema") or {}
+            if params.get("execution_engine") != "research_genome" or not schema:
+                continue
+            validation = params.get("validation") or {}
+            criteria = validation.get("criteria") or {}
+            for symbol in rs.symbols or []:
+                for timeframe in rs.timeframes or []:
+                    latest = (
+                        session.query(Candle.ts)
+                        .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+                        .order_by(Candle.ts.desc())
+                        .first()
+                    )
+                    if latest:
+                        scopes.append({
+                            "ruleset": rs,
+                            "schema": schema,
+                            "criteria": criteria,
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "latest": latest[0],
+                        })
+
+        if not scopes:
+            return JSONResponse({"error": "No active structured research rulesets found"}, status_code=400)
+
+        end_date = payload.get("end_date")
+        if end_date:
+            common_end = _parse_dt(end_date)
+        else:
+            common_end = min(item["latest"] for item in scopes)
+        common_start = common_end - timedelta(days=days)
+
+        strategies = []
+        all_trades = []
+        curves_by_key = {}
+        starting_balance_by_key = {}
+        for item in scopes:
+            rs = item["ruleset"]
+            schema = item["schema"]
+            criteria = item["criteria"]
+            symbol = item["symbol"]
+            timeframe = item["timeframe"]
+            rows = (
+                session.query(Candle)
+                .filter(
+                    Candle.symbol == symbol,
+                    Candle.timeframe == timeframe,
+                    Candle.ts >= common_start,
+                    Candle.ts <= common_end,
+                )
+                .order_by(Candle.ts.asc())
+                .all()
+            )
+            candles = [
+                {
+                    "time": c.ts.isoformat(),
+                    "open": c.open,
+                    "high": c.high,
+                    "low": c.low,
+                    "close": c.close,
+                    "volume": c.volume or 0,
+                }
+                for c in rows
+            ]
+            starting_balance = float(criteria.get("initial_balance") or initial_balance)
+            result = run_backtest(
+                BacktestConfig(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    strategy_type="research_genome",
+                    parameters=schema,
+                    start_date=common_start,
+                    end_date=common_end,
+                    initial_balance=starting_balance,
+                    spread_pips=float(criteria.get("spread_pips") or 1.5),
+                    pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
+                    lot_type=str(criteria.get("lot_type") or "mini"),
+                    risk_per_trade_pct=float(criteria.get("risk_per_trade_pct") or 0.35),
+                    sl_atr_multiplier=float(schema.get("sl_atr_multiplier", 2.0)),
+                    tp_atr_multiplier=float(schema.get("sl_atr_multiplier", 2.0)) * float(schema.get("tp_rr", 1.7)),
+                    monthly_max_loss_pct=float(criteria.get("max_drawdown_pct") or 6.0),
+                    entry_timing=entry_timing,
+                    slippage_pips=slippage_pips,
+                    min_sl_pips=min_sl_pips,
+                    enforce_live_exit_policy=enforce_live_exit_policy,
+                ),
+                candles,
+            )
+            pnl = round(result.final_balance - starting_balance, 2)
+            key = f"{rs.id}:{symbol}:{timeframe}"
+            curves_by_key[key] = result.equity_curve
+            starting_balance_by_key[key] = starting_balance
+            for trade in result.trades:
+                all_trades.append({
+                    **trade,
+                    "ruleset_id": rs.id,
+                    "ruleset_name": rs.name,
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                })
+            strategies.append({
+                "ruleset_id": rs.id,
+                "name": rs.name,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "candles": len(candles),
+                "start": candles[0]["time"] if candles else None,
+                "end": candles[-1]["time"] if candles else None,
+                "initial_balance": starting_balance,
+                "final_balance": result.final_balance,
+                "pnl": pnl,
+                "return_pct": round(pnl / starting_balance * 100.0, 3) if starting_balance else 0.0,
+                "total_trades": result.total_trades,
+                "winning_trades": result.winning_trades,
+                "losing_trades": result.losing_trades,
+                "win_rate": result.win_rate,
+                "profit_factor": result.profit_factor,
+                "max_drawdown": result.max_drawdown,
+                "max_drawdown_pct": round(result.max_drawdown * 100.0, 3),
+                "sharpe_ratio": result.sharpe_ratio,
+            })
+
+        gross_profit = sum(float(t.get("pnl") or 0.0) for t in all_trades if float(t.get("pnl") or 0.0) > 0)
+        gross_loss = abs(sum(float(t.get("pnl") or 0.0) for t in all_trades if float(t.get("pnl") or 0.0) <= 0))
+        wins = sum(1 for t in all_trades if float(t.get("pnl") or 0.0) > 0)
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (999.0 if gross_profit > 0 else 0.0)
+        total_pnl = round(sum(item["pnl"] for item in strategies), 2)
+        all_trades.sort(key=lambda t: t.get("exit_ts") or t.get("entry_ts") or "")
+        combined_curve = _combine_equity_curves(curves_by_key, starting_balance_by_key, initial_balance)
+        max_drawdown = _max_drawdown_from_curve(combined_curve)
+        portfolio = {
+            "window_start": common_start.isoformat(),
+            "window_end": common_end.isoformat(),
+            "days": days,
+            "mode": "realistic" if realistic else "legacy",
+            "entry_timing": entry_timing,
+            "slippage_pips": slippage_pips,
+            "min_sl_pips": min_sl_pips,
+            "enforce_live_exit_policy": enforce_live_exit_policy,
+            "initial_balance": initial_balance,
+            "final_balance_estimate": round(initial_balance + total_pnl, 2),
+            "pnl": total_pnl,
+            "return_pct": round(total_pnl / initial_balance * 100.0, 3) if initial_balance else 0.0,
+            "total_trades": len(all_trades),
+            "winning_trades": wins,
+            "losing_trades": len(all_trades) - wins,
+            "win_rate": round(wins / len(all_trades), 4) if all_trades else 0.0,
+            "profit_factor": round(min(profit_factor, 999.0), 4),
+            "max_drawdown": max_drawdown,
+            "max_drawdown_pct": round(max_drawdown * 100.0, 3),
+        }
+        return JSONResponse({
+            "portfolio": portfolio,
+            "strategies": strategies,
+            "trades": all_trades[-200:],
+        })
     finally:
         session.close()
 

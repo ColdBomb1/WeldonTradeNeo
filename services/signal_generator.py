@@ -34,8 +34,8 @@ _last_scanned_bar: dict[tuple[str, str, str], str] = {}
 _TIMEFRAME_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "1h": 60, "4h": 240, "1d": 1440}
 
 
-def _current_bar_key(timeframe: str, now: datetime) -> str:
-    """Return a stable ISO string for the bar currently in progress at `now`.
+def _bar_start(timeframe: str, now: datetime) -> datetime:
+    """Return the start timestamp for the bar currently in progress at `now`.
 
     Earlier versions keyed the gate off candles[-1]["time"], but the candle
     collector rewrites the in-progress bar's ts on every tick (seen in the DB
@@ -48,7 +48,11 @@ def _current_bar_key(timeframe: str, now: datetime) -> str:
     midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
     elapsed_min = int((now - midnight).total_seconds() // 60)
     bar_offset = (elapsed_min // tf_min) * tf_min
-    return (midnight + timedelta(minutes=bar_offset)).isoformat()
+    return midnight + timedelta(minutes=bar_offset)
+
+
+def _current_bar_key(timeframe: str, now: datetime) -> str:
+    return _bar_start(timeframe, now).isoformat()
 
 
 def _claim_new_bar(scan_key: str, timeframe: str, symbol: str, bar_ts: str) -> bool:
@@ -63,13 +67,28 @@ def _claim_new_bar(scan_key: str, timeframe: str, symbol: str, bar_ts: str) -> b
     return True
 
 
-def _query_candles(symbol: str, timeframe: str, limit: int = 200) -> list[dict]:
-    """Fetch recent candles from the database as dicts."""
+def _query_candles(
+    symbol: str,
+    timeframe: str,
+    limit: int = 200,
+    *,
+    closed_only: bool = True,
+) -> list[dict]:
+    """Fetch recent candles from the database as dicts.
+
+    By default, omit the currently forming bar. Live signal scans should make
+    decisions from the same closed-candle information available to backtests.
+    """
     session = get_session()
     try:
-        rows = (
+        query = (
             session.query(Candle)
             .filter(Candle.symbol == symbol, Candle.timeframe == timeframe)
+        )
+        if closed_only:
+            query = query.filter(Candle.ts < _bar_start(timeframe, datetime.now(timezone.utc)))
+        rows = (
+            query
             .order_by(Candle.ts.desc())
             .limit(limit)
             .all()
@@ -223,7 +242,7 @@ def _scan_once():
             # Bar-close gating: skip if we've already scanned this bar.
             # All strategies see the same candles for this (sym, tf) so one
             # gate covers all of them.
-            latest_bar_ts = _current_bar_key(timeframe, datetime.now(timezone.utc))
+            latest_bar_ts = candles[-1]["time"]
             if not _claim_new_bar("strategy", timeframe, symbol, latest_bar_ts):
                 continue
 
@@ -443,7 +462,7 @@ def _scan_rulesets():
                 # Bar-close gating: skip if we've already scanned this bar
                 # for this ruleset. Keeps a 15m ruleset on a 5min scan_interval
                 # firing the model once per bar instead of three.
-                latest_bar_ts = _current_bar_key(timeframe, datetime.now(timezone.utc))
+                latest_bar_ts = candles[-1]["time"]
                 if not _claim_new_bar(f"ruleset:{rs_id}", timeframe, symbol, latest_bar_ts):
                     skipped_same_bar += 1
                     continue
