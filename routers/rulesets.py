@@ -14,6 +14,7 @@ from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun
 from services import ai_service, rule_engine
+from services.backtest_engine import BacktestConfig, run_backtest
 from services.strategy_service import list_strategies
 
 router = APIRouter(tags=["rulesets"])
@@ -102,6 +103,71 @@ def _score_validation(metrics: dict, criteria: dict) -> dict:
         "status": "passed" if not reasons else "failed",
         "reasons": reasons,
         "criteria": criteria,
+    }
+
+
+def _structured_ruleset_settings(rs: RuleSet, payload: dict, initial_balance: float) -> dict:
+    params = rs.parameters or {}
+    validation = params.get("validation") or {}
+    criteria = validation.get("criteria") or {}
+    return {
+        "initial_balance": initial_balance,
+        "spread_pips": float(payload.get("spread_pips") or criteria.get("spread_pips") or 1.5),
+        "risk_per_trade_pct": float(
+            payload.get("risk_per_trade_pct") or criteria.get("risk_per_trade_pct") or 0.35
+        ),
+        "lot_type": payload.get("lot_type") or criteria.get("lot_type") or "mini",
+        "monthly_max_loss_pct": float(
+            payload.get("max_drawdown_pct") or criteria.get("max_drawdown_pct") or 6.0
+        ),
+    }
+
+
+def _backtest_structured_ruleset(
+    *,
+    schema: dict,
+    symbol: str,
+    timeframe: str,
+    candles: list[dict],
+    start_date: datetime,
+    end_date: datetime,
+    settings: dict,
+) -> dict:
+    result = run_backtest(
+        BacktestConfig(
+            symbol=symbol,
+            timeframe=timeframe,
+            strategy_type="research_genome",
+            parameters=schema,
+            start_date=start_date,
+            end_date=end_date,
+            initial_balance=float(settings["initial_balance"]),
+            spread_pips=float(settings["spread_pips"]),
+            pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
+            lot_type=str(settings["lot_type"]),
+            risk_per_trade_pct=float(settings["risk_per_trade_pct"]),
+            sl_atr_multiplier=float(schema.get("sl_atr_multiplier", 2.0)),
+            tp_atr_multiplier=float(schema.get("sl_atr_multiplier", 2.0)) * float(schema.get("tp_rr", 1.7)),
+            monthly_max_loss_pct=float(settings["monthly_max_loss_pct"]),
+        ),
+        candles,
+    )
+    return {
+        "final_balance": result.final_balance,
+        "total_trades": result.total_trades,
+        "winning_trades": result.winning_trades,
+        "losing_trades": result.losing_trades,
+        "win_rate": result.win_rate,
+        "max_drawdown": result.max_drawdown,
+        "profit_factor": result.profit_factor,
+        "sharpe_ratio": result.sharpe_ratio,
+        "equity_curve": result.equity_curve,
+        "trades": result.trades,
+        "monthly_pnl": result.monthly_pnl,
+        "max_monthly_drawdown": result.max_monthly_drawdown,
+        "avg_monthly_return": result.avg_monthly_return,
+        "months_above_target": result.months_above_target,
+        "execution_engine": "research_genome",
     }
 
 
@@ -355,8 +421,11 @@ def duplicate_ruleset(rs_id: int) -> JSONResponse:
 async def backtest_ruleset(rs_id: int, request: Request) -> JSONResponse:
     payload = await request.json()
     # Support both single symbol and multi-symbol ("all")
-    symbols_input = payload.get("symbols") or payload.get("symbol", "EURUSD")
-    if isinstance(symbols_input, str):
+    symbols_input = payload.get("symbols") or payload.get("symbol")
+    symbols: list[str] | None
+    if symbols_input is None:
+        symbols = None
+    elif isinstance(symbols_input, str):
         if symbols_input.lower() == "all":
             cfg = load_config()
             symbols = cfg.symbols
@@ -388,7 +457,13 @@ async def backtest_ruleset(rs_id: int, request: Request) -> JSONResponse:
         rs = session.query(RuleSet).filter(RuleSet.id == rs_id).first()
         if not rs:
             return JSONResponse({"error": "Not found"}, status_code=404)
+        if symbols is None:
+            symbols = rs.symbols or load_config().symbols
         rules_text = rs.rules_text
+        rs_params = rs.parameters or {}
+        structured_schema = rs_params.get("strategy_schema") or {}
+        structured = rs_params.get("execution_engine") == "research_genome" and bool(structured_schema)
+        structured_settings = _structured_ruleset_settings(rs, payload, initial_balance)
 
         # Load candles for ALL symbols (primary + cross-pair context)
         all_pair_candles = {}
@@ -437,11 +512,23 @@ async def backtest_ruleset(rs_id: int, request: Request) -> JSONResponse:
                 if rule_engine._active_backtests.get(bt_id):
                     break
                 candle_dicts = all_pair_candles[sym]
-                result = await asyncio.to_thread(
-                    rule_engine.backtest_rules, rules_text, sym, timeframe,
-                    candle_dicts, initial_balance=initial_balance, bt_id=bt_id, mode=mode,
-                    all_pair_candles=all_pair_candles,
-                )
+                if structured:
+                    result = await asyncio.to_thread(
+                        _backtest_structured_ruleset,
+                        schema=structured_schema,
+                        symbol=sym,
+                        timeframe=timeframe,
+                        candles=candle_dicts,
+                        start_date=start_date,
+                        end_date=end_date,
+                        settings=structured_settings,
+                    )
+                else:
+                    result = await asyncio.to_thread(
+                        rule_engine.backtest_rules, rules_text, sym, timeframe,
+                        candle_dicts, initial_balance=initial_balance, bt_id=bt_id, mode=mode,
+                        all_pair_candles=all_pair_candles,
+                    )
                 if rule_engine._active_backtests.get(bt_id):
                     break
                 per_symbol_full[sym] = result
