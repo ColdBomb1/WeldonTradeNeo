@@ -338,7 +338,8 @@ def run_research(
     result["ai_review"] = _ai_review(result) if settings["ai_review"] and candidates else None
     _research_progress[run_id].update({
         "status": result["status"],
-        "generation": len(generations),
+        "generation": settings["generations"],
+        "completed_group_generations": len(generations),
         "best_score": candidates[0]["score"] if candidates else None,
         "best_metrics": (
             candidates[0].get("holdout_metrics")
