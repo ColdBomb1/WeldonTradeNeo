@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
@@ -44,15 +44,7 @@ def _trade_to_dict(t: LiveTrade) -> dict:
 
 @router.get("/trades")
 def trades_page(request: Request):
-    cfg = load_config()
-    return TEMPLATES.TemplateResponse(
-        "trades.html",
-        {
-            "request": request,
-            "symbols": cfg.symbols,
-            "execution_mode": cfg.execution.mode,
-        },
-    )
+    return RedirectResponse(url="/operations")
 
 
 @router.get("/api/trades")
@@ -97,6 +89,38 @@ def get_trades(
         return JSONResponse({
             "count": len(result),
             "trades": result,
+        })
+    finally:
+        session.close()
+
+@router.get("/api/trades/summary")
+def get_trade_summary() -> JSONResponse:
+    session = get_session()
+    try:
+        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+        open_trades = session.query(LiveTrade).filter(LiveTrade.status == "open").all()
+        closed_today = session.query(LiveTrade).filter(
+            LiveTrade.status == "closed",
+            LiveTrade.closed_at >= today_start,
+        ).all()
+        all_closed = session.query(LiveTrade).filter(LiveTrade.status == "closed").all()
+
+        unrealized_pnl = sum(t.pnl or 0 for t in open_trades)
+        daily_pnl = sum(t.pnl or 0 for t in closed_today)
+        total_pnl = sum(t.pnl or 0 for t in all_closed)
+        total_trades = len(all_closed)
+        winning = sum(1 for t in all_closed if t.pnl and t.pnl > 0)
+        win_rate = winning / total_trades if total_trades > 0 else 0
+
+        return JSONResponse({
+            "open_positions": len(open_trades),
+            "unrealized_pnl": round(unrealized_pnl, 2),
+            "daily_pnl": round(daily_pnl, 2),
+            "daily_trades": len(closed_today),
+            "total_pnl": round(total_pnl, 2),
+            "total_trades": total_trades,
+            "win_rate": round(win_rate, 4),
         })
     finally:
         session.close()
@@ -159,38 +183,5 @@ def modify_trade(trade_id: int, body: ModifyRequest) -> JSONResponse:
     except Exception:
         session.rollback()
         raise
-    finally:
-        session.close()
-
-
-@router.get("/api/trades/summary")
-def get_trade_summary() -> JSONResponse:
-    session = get_session()
-    try:
-        today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-
-        open_trades = session.query(LiveTrade).filter(LiveTrade.status == "open").all()
-        closed_today = session.query(LiveTrade).filter(
-            LiveTrade.status == "closed",
-            LiveTrade.closed_at >= today_start,
-        ).all()
-        all_closed = session.query(LiveTrade).filter(LiveTrade.status == "closed").all()
-
-        unrealized_pnl = sum(t.pnl or 0 for t in open_trades)
-        daily_pnl = sum(t.pnl or 0 for t in closed_today)
-        total_pnl = sum(t.pnl or 0 for t in all_closed)
-        total_trades = len(all_closed)
-        winning = sum(1 for t in all_closed if t.pnl and t.pnl > 0)
-        win_rate = winning / total_trades if total_trades > 0 else 0
-
-        return JSONResponse({
-            "open_positions": len(open_trades),
-            "unrealized_pnl": round(unrealized_pnl, 2),
-            "daily_pnl": round(daily_pnl, 2),
-            "daily_trades": len(closed_today),
-            "total_pnl": round(total_pnl, 2),
-            "total_trades": total_trades,
-            "win_rate": round(win_rate, 4),
-        })
     finally:
         session.close()

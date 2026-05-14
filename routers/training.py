@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
@@ -22,17 +22,7 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @router.get("/training")
 def training_page(request: Request):
-    cfg = load_config()
-    return TEMPLATES.TemplateResponse(
-        "training.html",
-        {
-            "request": request,
-            "symbols": cfg.symbols,
-            "timeframes": cfg.candle_timeframes,
-            "strategies": list_strategies(),
-            "training_config": cfg.training,
-        },
-    )
+    return RedirectResponse(url="/research")
 
 
 @router.get("/api/training/runs")

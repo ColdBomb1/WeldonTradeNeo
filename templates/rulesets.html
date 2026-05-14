@@ -9,11 +9,17 @@
 
 {% block content %}
 <header>
-  <h1>Rule-Based Strategies</h1>
-  <p>Define trading rules in natural language. Training creates candidate rulesets; candidates require a validation backtest before promotion to active trading.</p>
+  <h1>Strategy Portfolio</h1>
+  <p>Promote validated research candidates, review active per-symbol strategies, and manage production strategy status.</p>
 </header>
 <main>
   <section class="card">
+    <h2>Promotion Workflow</h2>
+    <p class="small">New production strategies should come from structured research runs. Candidates still require validation before promotion.</p>
+    <a class="btn" href="/research">Open Research Runs</a>
+  </section>
+
+  <section class="card hidden">
     <h2>Create Rule Set</h2>
     <label>
       Name
@@ -73,7 +79,7 @@
   </section>
 
   <section class="card">
-    <h2>Rule Sets</h2>
+    <h2>Strategies</h2>
     <table class="table" id="rs-table">
       <thead>
         <tr>
@@ -108,9 +114,9 @@
       </select></label>
     </div>
 
-    <h3>Rules (v<span id="detail-version">1</span>)</h3>
-    <textarea id="detail-rules" rows="10" style="width:100%;font-family:monospace;font-size:13px"></textarea>
-    <button type="button" id="save-rules-btn" style="margin-top:5px">Save Rules</button>
+    <h3>Strategy Definition (v<span id="detail-version">1</span>)</h3>
+    <textarea id="detail-rules" rows="10" style="width:100%;font-family:monospace;font-size:13px" readonly></textarea>
+    <button type="button" id="save-rules-btn" class="hidden" style="margin-top:5px">Save Rules</button>
 
     <h3>Backtest</h3>
     <div class="row">
@@ -151,6 +157,7 @@
     </div>
     <div id="bt-results" style="margin-top:10px"></div>
 
+    <div class="hidden" id="legacy-training-panel">
     <h3>Train (Evolve Rules)</h3>
     <div class="row">
       <label>Symbols <select id="tr-symbols" multiple style="height:60px">
@@ -201,6 +208,7 @@
       <div id="tr-changes" style="max-height:300px;overflow-y:auto;font-size:13px;white-space:pre-wrap"></div>
     </div>
     <div id="train-status" style="margin-top:10px"></div>
+    </div>
 
     <h3>Performance</h3>
     <div id="perf-display" class="status-grid"></div>
@@ -333,13 +341,15 @@
     const rulesets = data.rulesets || [];
     renderPortfolio(rulesets);
     if (!rulesets.length) {
-      tbody.innerHTML = '<tr><td colspan="8" class="small">No rule sets yet. Create one above.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No strategies yet. Run research to create candidates.</td></tr>';
       return;
     }
     rulesets.forEach(rs => {
       const row = document.createElement('tr');
       row.style.cursor = 'pointer';
       const pm = rs.performance_metrics || {};
+      const params = rs.parameters || {};
+      const structured = params.execution_engine === 'research_genome' && params.strategy_schema;
       let actions = '';
       if (rs.status === 'active') {
         actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'deactivate')">Deactivate</button>`;
@@ -347,8 +357,10 @@
         actions = `<button onclick="event.stopPropagation();promoteRs(${rs.id})">Promote</button>`;
       } else if (rs.status === 'candidate') {
         actions = `<button onclick="event.stopPropagation();validateRs(${rs.id})">Validate</button>`;
-      } else {
+      } else if (structured) {
         actions = `<button onclick="event.stopPropagation();toggleStatus(${rs.id},'activate')">Activate</button>`;
+      } else {
+        actions = '--';
       }
       actions += ` <button onclick="event.stopPropagation();duplicateRs(${rs.id})">Clone</button>`;
       if (rs.status !== 'active') {

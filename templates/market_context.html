@@ -1,0 +1,322 @@
+{% extends "base.html" %}
+{% set active_page = "market_context" %}
+
+{% block title %}Market Context - WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Market Context</h1>
+  <p>MT5 price data, news, COT positioning, sentiment, and collection health.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Controls</h2>
+    <div class="row">
+      <label>Timeframe
+        <select id="timeframe">
+          {% for tf in timeframes %}
+          <option value="{{ tf }}" {% if tf == default_timeframe %}selected{% endif %}>{{ tf }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <div class="button-wrap" style="gap:8px;flex-wrap:wrap">
+        <button type="button" id="refresh-btn">Refresh</button>
+        <button type="button" id="calendar-btn">Refresh Calendar</button>
+        <button type="button" id="cot-btn">Sync COT</button>
+      </div>
+    </div>
+    <div class="status-grid" id="system-summary">
+      <div class="status-item"><span class="status-label">Price Source</span><span class="status-value">{{ default_source }}</span></div>
+      <div class="status-item"><span class="status-label">News</span><span class="status-value">{{ "Enabled" if news_enabled else "Disabled" }}</span></div>
+      <div class="status-item"><span class="status-label">Sentiment</span><span class="status-value">{{ "Enabled" if sentiment_enabled else "Disabled" }}</span></div>
+      <div class="status-item"><span class="status-label">Updated</span><span class="status-value" id="generated-at">--</span></div>
+    </div>
+    <p class="small" id="status-msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>Symbol Context</h2>
+    <table class="table" id="context-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Price</th>
+          <th>Candle</th>
+          <th>Session</th>
+          <th>Strength</th>
+          <th>COT</th>
+          <th>News</th>
+          <th>Sentiment</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="8" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Candle Freshness</h2>
+    <table class="table" id="freshness-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>TF</th>
+          <th>Source</th>
+          <th>Count</th>
+          <th>Latest</th>
+          <th>Age</th>
+          <th>Close</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="7" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Upcoming News</h2>
+    <table class="table" id="events-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Currency</th>
+          <th>Impact</th>
+          <th>Event</th>
+          <th>Forecast</th>
+          <th>Previous</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="6" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>COT Positioning</h2>
+    <table class="table" id="cot-table">
+      <thead>
+        <tr>
+          <th>Currency</th>
+          <th>Net % OI</th>
+          <th>Net Contracts</th>
+          <th>Open Interest</th>
+          <th>Report</th>
+          <th>Available</th>
+          <th>Age</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="7" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Sentiment</h2>
+    <table class="table" id="sentiment-table">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Score</th>
+          <th>Source</th>
+          <th>Updated</th>
+          <th>Age</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="5" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function fmtTime(value) {
+    return value ? new Date(value).toLocaleString() : '--';
+  }
+  function fmtAge(minutes) {
+    if (minutes == null || isNaN(Number(minutes))) return '--';
+    const m = Number(minutes);
+    if (m < 90) return `${m.toFixed(0)}m`;
+    if (m < 1440) return `${(m / 60).toFixed(1)}h`;
+    return `${(m / 1440).toFixed(1)}d`;
+  }
+  function fmtNum(value, digits = 2) {
+    if (value == null || isNaN(Number(value))) return '--';
+    return Number(value).toFixed(digits);
+  }
+  function fmtPrice(value, symbol) {
+    if (value == null || isNaN(Number(value))) return '--';
+    return Number(value).toFixed(symbol && symbol.includes('JPY') ? 3 : 5);
+  }
+  function signed(value, digits = 2) {
+    if (value == null || isNaN(Number(value))) return '--';
+    const n = Number(value);
+    const color = n >= 0 ? '#1b5b41' : '#8f2d2d';
+    return `<span style="color:${color};font-weight:600">${n >= 0 ? '+' : ''}${n.toFixed(digits)}</span>`;
+  }
+  function badge(text, kind = 'neutral') {
+    return `<span class="badge badge-${kind}">${text || '--'}</span>`;
+  }
+  async function api(path, options) {
+    const resp = await fetch(path, options);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+    return data;
+  }
+
+  function renderContext(rows) {
+    const tbody = document.querySelector('#context-table tbody');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="8" class="small">No context rows available.</td></tr>';
+      return;
+    }
+    rows.forEach(row => {
+      const news = row.high_impact_near
+        ? badge('High impact near', 'warning')
+        : (row.minutes_to_high_impact != null ? `${fmtAge(row.minutes_to_high_impact)} to high` : '--');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.symbol}</td>
+        <td>${fmtPrice(row.close, row.symbol)}</td>
+        <td>${fmtTime(row.time)}<br><span class="small">${row.source || '--'}</span></td>
+        <td>${row.session || '--'}<br><span class="small">${fmtNum((row.session_quality || 0) * 100, 0)} quality</span></td>
+        <td>${signed(row.currency_strength_bias, 3)}</td>
+        <td>${signed(row.cot_bias, 2)}</td>
+        <td>${news}<br><span class="small">${row.next_high_impact_title || ''}</span></td>
+        <td>${signed(row.sentiment_score, 2)}<br><span class="small">${fmtAge(row.sentiment_age_minutes)}</span></td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderFreshness(rows) {
+    const tbody = document.querySelector('#freshness-table tbody');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="small">No candles available.</td></tr>';
+      return;
+    }
+    rows.forEach(row => {
+      const stale = row.age_minutes != null && row.age_minutes > 180;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.symbol}</td>
+        <td>${row.timeframe}</td>
+        <td>${row.source || '--'}</td>
+        <td>${row.count}</td>
+        <td>${fmtTime(row.latest)}</td>
+        <td>${stale ? badge(fmtAge(row.age_minutes), 'warning') : fmtAge(row.age_minutes)}</td>
+        <td>${fmtPrice(row.close, row.symbol)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderEvents(events) {
+    const tbody = document.querySelector('#events-table tbody');
+    tbody.innerHTML = '';
+    if (!events.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="small">No upcoming events in the next 24 hours.</td></tr>';
+      return;
+    }
+    events.forEach(event => {
+      const kind = event.impact === 'high' ? 'danger' : (event.impact === 'medium' ? 'warning' : 'neutral');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${fmtTime(event.event_time)}</td>
+        <td>${event.currency || '--'}</td>
+        <td>${badge(event.impact, kind)}</td>
+        <td>${event.title || '--'}</td>
+        <td>${event.forecast || '--'}</td>
+        <td>${event.previous || '--'}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderCot(rows) {
+    const tbody = document.querySelector('#cot-table tbody');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="small">No COT rows found.</td></tr>';
+      return;
+    }
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.currency}</td>
+        <td>${signed(row.noncommercial_net_pct, 2)}</td>
+        <td>${fmtNum(row.noncommercial_net, 0)}</td>
+        <td>${fmtNum(row.open_interest, 0)}</td>
+        <td>${fmtTime(row.report_date)}</td>
+        <td>${fmtTime(row.available_at)}</td>
+        <td>${row.age_days != null ? row.age_days.toFixed(1) + 'd' : '--'}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderSentiment(rows) {
+    const tbody = document.querySelector('#sentiment-table tbody');
+    tbody.innerHTML = '';
+    if (!rows.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="small">No sentiment scores found.</td></tr>';
+      return;
+    }
+    rows.forEach(row => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${row.symbol}</td>
+        <td>${signed(row.score, 2)}</td>
+        <td>${row.source || '--'}</td>
+        <td>${fmtTime(row.ts)}</td>
+        <td>${fmtAge(row.age_minutes)}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  async function loadSummary() {
+    const tf = document.getElementById('timeframe').value;
+    const msg = document.getElementById('status-msg');
+    msg.textContent = 'Loading...';
+    try {
+      const data = await api(`/api/market-context/summary?timeframe=${encodeURIComponent(tf)}`);
+      document.getElementById('generated-at').textContent = fmtTime(data.generated_at);
+      renderContext(data.symbol_context || []);
+      renderFreshness(data.candle_stats || []);
+      renderEvents(data.events || []);
+      renderCot(data.cot || []);
+      renderSentiment(data.sentiment || []);
+      msg.textContent = '';
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+    }
+  }
+
+  document.getElementById('refresh-btn').addEventListener('click', loadSummary);
+  document.getElementById('timeframe').addEventListener('change', loadSummary);
+  document.getElementById('calendar-btn').addEventListener('click', async () => {
+    const msg = document.getElementById('status-msg');
+    msg.textContent = 'Refreshing calendar...';
+    try {
+      const data = await api('/api/calendar/refresh', { method: 'POST' });
+      msg.textContent = data.status || 'Calendar refreshed.';
+      loadSummary();
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+    }
+  });
+  document.getElementById('cot-btn').addEventListener('click', async () => {
+    const msg = document.getElementById('status-msg');
+    msg.textContent = 'Syncing COT...';
+    try {
+      const data = await api('/api/market-context/cot/sync', { method: 'POST' });
+      msg.textContent = `COT sync complete. Stored ${data.stored || 0} new rows.`;
+      loadSummary();
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#8f2d2d">${e.message}</span>`;
+    }
+  });
+
+  loadSummary();
+  setInterval(loadSummary, 60000);
+</script>
+{% endblock %}

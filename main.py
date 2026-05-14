@@ -47,7 +47,7 @@ from services.trade_manager import position_sync_loop
 from services.news_service import news_collection_loop
 from routers.accounts import account_snapshot_loop
 
-from routers import marketdata, history, candles, indicators, accounts, settings, trade_plans, signals, trades, news, analytics, training, rulesets, research
+from routers import marketdata, history, candles, indicators, accounts, settings, trade_plans, signals, trades, news, analytics, training, rulesets, research, operations, market_context
 
 app = FastAPI(title="WeldonTrader")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -62,7 +62,9 @@ app.include_router(settings.router)
 app.include_router(trade_plans.router)
 app.include_router(signals.router)
 app.include_router(trades.router)
+app.include_router(operations.router)
 app.include_router(news.router)
+app.include_router(market_context.router)
 app.include_router(analytics.router)
 app.include_router(training.router)
 app.include_router(rulesets.router)

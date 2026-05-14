@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
@@ -42,25 +42,7 @@ def _signal_to_dict(sig: Signal) -> dict:
 
 @router.get("/signals")
 def signals_page(request: Request):
-    cfg = load_config()
-    from models.ruleset import RuleSet
-    session = get_session()
-    try:
-        active_rs = session.query(RuleSet).filter(RuleSet.status == "active").all()
-        active_names = ", ".join(f"{r.name} (v{r.version})" for r in active_rs)
-    finally:
-        session.close()
-
-    return TEMPLATES.TemplateResponse(
-        "signals.html",
-        {
-            "request": request,
-            "symbols": cfg.symbols,
-            "signals_enabled": cfg.signals.enabled,
-            "scan_interval": cfg.signals.scan_interval_sec,
-            "active_rulesets": active_names or "None",
-        },
-    )
+    return RedirectResponse(url="/operations")
 
 
 @router.get("/api/signals")

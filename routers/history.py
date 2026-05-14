@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
@@ -28,18 +28,7 @@ def _parse_dt(value: str | None) -> datetime:
 
 @router.get("/charts")
 def charts(request: Request, symbol: str | None = None, timeframe: str = "live"):
-    cfg = load_config()
-    selected_symbol = symbol or (cfg.symbols[0] if cfg.symbols else "")
-    return TEMPLATES.TemplateResponse(
-        "charts.html",
-        {
-            "request": request,
-            "symbols": cfg.symbols,
-            "timeframes": ["live"] + list(cfg.candle_timeframes),
-            "selected_symbol": selected_symbol,
-            "selected_timeframe": timeframe,
-        },
-    )
+    return RedirectResponse(url="/analytics")
 
 
 @router.get("/api/history-data")

@@ -11,20 +11,17 @@
     <aside class="sidebar">
       <h1>WeldonTrader</h1>
       <nav>
-        <div class="section-label">Market Data</div>
+        <div class="section-label">Overview</div>
         <a href="/dashboard" {% if active_page == 'dashboard' %}class="active"{% endif %}>Dashboard</a>
-        <a href="/candles" {% if active_page == 'candles' %}class="active"{% endif %}>Candle Data</a>
-        <a href="/charts" {% if active_page == 'charts' %}class="active"{% endif %}>History Charts</a>
-        <a href="/calendar" {% if active_page == 'calendar' %}class="active"{% endif %}>Calendar</a>
+        <a href="/analytics" {% if active_page == 'analytics' %}class="active"{% endif %}>Performance</a>
+        <div class="section-label">Research</div>
+        <a href="/research" {% if active_page == 'research' %}class="active"{% endif %}>Research Runs</a>
+        <a href="/rulesets" {% if active_page == 'rulesets' %}class="active"{% endif %}>Strategy Portfolio</a>
         <div class="section-label">Trading</div>
-        <a href="/rulesets" {% if active_page == 'rulesets' %}class="active"{% endif %}>Rule Sets</a>
-        <a href="/signals" {% if active_page == 'signals' %}class="active"{% endif %}>Signals</a>
-        <a href="/trades" {% if active_page == 'trades' %}class="active"{% endif %}>Live Trades</a>
-        <a href="/trade-plans" {% if active_page == 'trade_plans' %}class="active"{% endif %}>Trade Plans</a>
+        <a href="/operations" {% if active_page == 'operations' %}class="active"{% endif %}>Trade Operations</a>
         <a href="/accounts" {% if active_page == 'accounts' %}class="active"{% endif %}>Accounts</a>
-        <a href="/analytics" {% if active_page == 'analytics' %}class="active"{% endif %}>Analytics</a>
-        <a href="/research" {% if active_page == 'research' %}class="active"{% endif %}>Research</a>
-        <a href="/training" {% if active_page == 'training' %}class="active"{% endif %}>Training</a>
+        <div class="section-label">Data</div>
+        <a href="/market-context" {% if active_page == 'market_context' %}class="active"{% endif %}>Market Context</a>
         <div class="section-label">System</div>
         <a href="/settings" {% if active_page == 'settings' %}class="active"{% endif %}>Settings</a>
       </nav>

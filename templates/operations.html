@@ -1,0 +1,230 @@
+{% extends "base.html" %}
+{% set active_page = "operations" %}
+
+{% block title %}Trade Operations - WeldonTrader{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Trade Operations</h1>
+  <p>Monitor generated signals, open positions, broker history, and execution controls from one place.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Execution Controls</h2>
+    <div class="status-grid" id="operation-status">
+      <div class="status-item"><span class="status-label">Mode</span><span class="status-value">{{ execution_mode }}</span></div>
+      <div class="status-item"><span class="status-label">Trading</span><span class="status-value">{{ "Paused" if paused else "Active" }}</span></div>
+      <div class="status-item"><span class="status-label">Signals</span><span class="status-value">{{ "Enabled" if signals_enabled else "Disabled" }}</span></div>
+      <div class="status-item"><span class="status-label">Open P&L</span><span class="status-value" id="open-pnl">--</span></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button type="button" id="pause-btn">Pause</button>
+      <button type="button" id="resume-btn">Resume</button>
+      <button type="button" id="paper-btn">Paper</button>
+      <button type="button" id="live-btn">Live</button>
+      <button type="button" id="scan-btn">Scan Now</button>
+    </div>
+    <p class="small" id="controls-msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>Accounts</h2>
+    <table class="table" id="accounts-table">
+      <thead><tr><th>Name</th><th>Type</th><th>Status</th><th>Balance</th><th>Equity</th><th>Currency</th></tr></thead>
+      <tbody><tr><td colspan="6" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Open Trades</h2>
+    <table class="table" id="open-trades-table">
+      <thead><tr><th>ID</th><th>Symbol</th><th>Side</th><th>Entry</th><th>SL</th><th>TP</th><th>Volume</th><th>P&L</th><th>Actions</th></tr></thead>
+      <tbody><tr><td colspan="9" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Recent Signals</h2>
+    <table class="table" id="signals-table">
+      <thead><tr><th>ID</th><th>Created</th><th>Symbol</th><th>TF</th><th>Side</th><th>Confidence</th><th>Status</th><th>Reason</th><th>Actions</th></tr></thead>
+      <tbody><tr><td colspan="9" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Recent Trade History</h2>
+    <table class="table" id="history-table">
+      <thead><tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Volume</th><th>Price</th><th>P&L</th><th>Platform</th></tr></thead>
+      <tbody><tr><td colspan="7" class="small">Loading...</td></tr></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  function fmtMoney(v) {
+    if (v == null || isNaN(Number(v))) return '--';
+    const n = Number(v);
+    const c = n >= 0 ? '#27ae60' : '#e74c3c';
+    return `<span style="color:${c};font-weight:600">${n >= 0 ? '+' : ''}$${n.toFixed(2)}</span>`;
+  }
+  function fmtNum(v, digits = 5) {
+    if (v == null || isNaN(Number(v))) return '--';
+    return Number(v).toFixed(digits);
+  }
+  function fmtTime(v) {
+    return v ? new Date(v).toLocaleString() : '--';
+  }
+  function badge(text) {
+    return `<span class="badge badge-neutral">${text || '--'}</span>`;
+  }
+
+  async function api(path, options) {
+    const resp = await fetch(path, options);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+    return data;
+  }
+
+  async function loadAccounts() {
+    const data = await api('/api/accounts/status');
+    const tbody = document.querySelector('#accounts-table tbody');
+    tbody.innerHTML = '';
+    const accounts = data.accounts || [];
+    if (!accounts.length) {
+      tbody.innerHTML = '<tr><td colspan="6" class="small">No accounts configured.</td></tr>';
+      return;
+    }
+    accounts.forEach(a => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${a.name || '--'}</td>
+        <td>${a.type || '--'}</td>
+        <td>${a.enabled === false ? 'disabled' : (a.connected ? 'connected' : (a.error || 'connecting'))}</td>
+        <td>${a.balance != null ? '$' + Number(a.balance).toFixed(2) : '--'}</td>
+        <td>${a.equity != null ? '$' + Number(a.equity).toFixed(2) : '--'}</td>
+        <td>${a.currency || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadSummary() {
+    const data = await api('/api/trades/summary');
+    document.getElementById('open-pnl').innerHTML = fmtMoney(data.unrealized_pnl || 0);
+  }
+
+  async function loadOpenTrades() {
+    const data = await api('/api/trades?status=open&limit=100');
+    const tbody = document.querySelector('#open-trades-table tbody');
+    tbody.innerHTML = '';
+    const trades = data.trades || [];
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No open trades.</td></tr>';
+      return;
+    }
+    trades.forEach(t => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${t.id}</td><td>${t.symbol}</td><td>${t.side}</td>
+        <td>${fmtNum(t.entry_price)}</td><td>${fmtNum(t.stop_loss)}</td><td>${fmtNum(t.take_profit)}</td>
+        <td>${t.volume ?? '--'}</td><td>${fmtMoney(t.pnl || 0)}</td>
+        <td><button type="button" onclick="closeTrade(${t.id})">Close</button></td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadSignals() {
+    const data = await api('/api/signals?limit=50');
+    const tbody = document.querySelector('#signals-table tbody');
+    tbody.innerHTML = '';
+    const signals = data.signals || [];
+    if (!signals.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No recent signals.</td></tr>';
+      return;
+    }
+    signals.forEach(s => {
+      const actionable = ['pending', 'confirmed'].includes(s.status);
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${s.id}</td><td>${fmtTime(s.created_at)}</td><td>${s.symbol}</td><td>${s.timeframe}</td>
+        <td>${s.side}</td><td>${s.confidence != null ? (s.confidence * 100).toFixed(0) + '%' : '--'}</td>
+        <td>${badge(s.status)}</td><td class="small">${s.reason || s.reject_reason || '--'}</td>
+        <td>${actionable ? `<button type="button" onclick="executeSignal(${s.id})">Execute</button> <button type="button" onclick="rejectSignal(${s.id})">Reject</button>` : '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function loadHistory() {
+    const data = await api('/api/accounts/history');
+    const tbody = document.querySelector('#history-table tbody');
+    tbody.innerHTML = '';
+    const deals = (data.deals || []).slice(0, 80);
+    if (!deals.length) {
+      tbody.innerHTML = '<tr><td colspan="7" class="small">No trade history yet.</td></tr>';
+      return;
+    }
+    deals.forEach(d => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${fmtTime(d.time)}</td><td>${d.symbol || '--'}</td><td>${d.type || d.side || '--'}</td>
+        <td>${d.volume ?? '--'}</td><td>${fmtNum(d.price)}</td><td>${fmtMoney(d.profit || 0)}</td><td>${d.platform || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function refreshAll() {
+    await Promise.allSettled([loadAccounts(), loadSummary(), loadOpenTrades(), loadSignals(), loadHistory()]);
+  }
+
+  async function closeTrade(id) {
+    if (!confirm(`Close trade #${id}?`)) return;
+    await api(`/api/trades/${id}/close`, { method: 'POST' });
+    refreshAll();
+  }
+  async function executeSignal(id) {
+    await api(`/api/signals/${id}/execute`, { method: 'POST' });
+    refreshAll();
+  }
+  async function rejectSignal(id) {
+    await api(`/api/signals/${id}/reject`, { method: 'POST' });
+    refreshAll();
+  }
+
+  document.getElementById('pause-btn').addEventListener('click', async () => {
+    await api('/api/accounts/pause', { method: 'POST' });
+    location.reload();
+  });
+  document.getElementById('resume-btn').addEventListener('click', async () => {
+    await api('/api/accounts/resume', { method: 'POST' });
+    location.reload();
+  });
+  document.getElementById('paper-btn').addEventListener('click', async () => {
+    await api('/api/accounts/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'paper' }) });
+    location.reload();
+  });
+  document.getElementById('live-btn').addEventListener('click', async () => {
+    if (!confirm('Switch execution mode to live?')) return;
+    await api('/api/accounts/mode', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: 'live' }) });
+    location.reload();
+  });
+  document.getElementById('scan-btn').addEventListener('click', async () => {
+    const msg = document.getElementById('controls-msg');
+    msg.textContent = 'Scanning...';
+    try {
+      const data = await api('/api/signals/scan-now', { method: 'POST' });
+      msg.textContent = data.status || 'Scan complete.';
+      refreshAll();
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#e74c3c">${e.message}</span>`;
+    }
+  });
+
+  refreshAll();
+  setInterval(refreshAll, 15000);
+</script>
+{% endblock %}

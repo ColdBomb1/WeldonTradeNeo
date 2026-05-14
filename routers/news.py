@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
@@ -17,15 +17,7 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @router.get("/calendar")
 def calendar_page(request: Request):
-    cfg = load_config()
-    return TEMPLATES.TemplateResponse(
-        "calendar.html",
-        {
-            "request": request,
-            "symbols": cfg.symbols,
-            "news_enabled": cfg.news.enabled,
-        },
-    )
+    return RedirectResponse(url="/market-context")
 
 
 @router.get("/api/calendar")

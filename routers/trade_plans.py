@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
@@ -32,20 +32,7 @@ TEMPLATES = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 @router.get("/trade-plans")
 def trade_plans_page(request: Request):
-    cfg = load_config()
-    session = get_session()
-    plans = session.query(TradePlan).order_by(TradePlan.created_at.desc()).all()
-    session.close()
-    return TEMPLATES.TemplateResponse(
-        "trade_plans.html",
-        {
-            "request": request,
-            "plans": plans,
-            "strategies": list_strategies(),
-            "symbols": cfg.symbols,
-            "timeframes": cfg.candle_timeframes,
-        },
-    )
+    return RedirectResponse(url="/research")
 
 
 @router.get("/api/trade-plans")
