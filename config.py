@@ -236,7 +236,7 @@ def load_config() -> AppConfig:
         save_config(cfg)
         return cfg
 
-    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    data = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
     cfg = AppConfig.model_validate(data)
     _migrate_legacy_config(cfg, data)
     if not cfg.server_id:
