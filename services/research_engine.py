@@ -61,7 +61,7 @@ DEFAULT_SETTINGS = {
     "min_monthly_tests_for_gate": 3,
     "mutation_rate": 0.35,
     "seed": None,
-    "ai_review": True,
+    "ai_review": False,
 }
 
 PARAM_SPACE = {
