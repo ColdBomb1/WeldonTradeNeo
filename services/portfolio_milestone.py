@@ -102,6 +102,150 @@ def evaluate_active_milestone(session, payload: dict | None, cfg) -> dict:
     }
 
 
+def validate_portfolio(session, payload: dict | None, cfg) -> dict:
+    payload = payload or {}
+    targets = normalize_targets(payload)
+    options = normalize_options(payload, cfg)
+    selected_ids = _normalize_ruleset_ids(payload.get("ruleset_ids"))
+    selection_source = "explicit"
+    search_result = None
+    if not selected_ids and _coerce_bool(payload.get("auto_select"), False):
+        search_payload = {
+            **payload,
+            "include_candidates": _coerce_bool(payload.get("include_candidates"), True),
+            "top_portfolios": max(1, int(payload.get("top_portfolios") or 10)),
+        }
+        search_result = search_candidate_portfolios(session, search_payload, cfg)
+        best = search_result.get("best_passing")
+        if not best:
+            return {
+                "targets": targets,
+                "status": {
+                    "passed": False,
+                    "status": "failed",
+                    "reasons": ["No passing candidate portfolio was found."],
+                },
+                "search": _compact_search_result(search_result),
+                "selected_rulesets": [],
+            }
+        selected_ids = [int(item["ruleset_id"]) for item in best.get("strategies") or []]
+        selection_source = "auto_select_best_passing"
+
+    if not selected_ids:
+        return {
+            "targets": targets,
+            "status": {
+                "passed": False,
+                "status": "failed",
+                "reasons": ["ruleset_ids are required unless auto_select is enabled."],
+            },
+            "selected_rulesets": [],
+        }
+
+    rulesets = (
+        session.query(RuleSet)
+        .filter(RuleSet.id.in_(selected_ids))
+        .order_by(RuleSet.id.asc())
+        .all()
+    )
+    found_ids = {int(rs.id) for rs in rulesets}
+    missing_ids = [ruleset_id for ruleset_id in selected_ids if ruleset_id not in found_ids]
+    scopes = build_structured_scopes(session, rulesets)
+    selected_conflicts = _selected_scope_conflicts(scopes)
+    if missing_ids or selected_conflicts:
+        reasons = []
+        if missing_ids:
+            reasons.append(f"Missing rulesets: {', '.join(str(item) for item in missing_ids)}.")
+        reasons.extend(selected_conflicts)
+        return {
+            "targets": targets,
+            "status": {"passed": False, "status": "failed", "reasons": reasons},
+            "selected_rulesets": _selected_rulesets_summary(rulesets),
+        }
+    if not scopes:
+        return {
+            "targets": targets,
+            "status": {
+                "passed": False,
+                "status": "failed",
+                "reasons": ["No selected rulesets contain structured research strategies."],
+            },
+            "selected_rulesets": _selected_rulesets_summary(rulesets),
+        }
+
+    common_end = options["end_date"] or min(item["latest"] for item in scopes)
+    short = evaluate_portfolio_scopes(
+        session,
+        scopes,
+        days=targets["short_days"],
+        options=options,
+        common_end=common_end,
+    )
+    long = evaluate_portfolio_scopes(
+        session,
+        scopes,
+        days=targets["long_days"],
+        options=options,
+        common_end=common_end,
+    )
+    status = score_milestone(short["portfolio"], long["portfolio"], targets)
+    validation_id = f"portfolio_validation_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+    return {
+        "validation_id": validation_id,
+        "validated_at": datetime.now(timezone.utc).isoformat(),
+        "selection_source": selection_source,
+        "targets": targets,
+        "options": _public_options(options),
+        "status": status,
+        "selected_ruleset_ids": [int(rs.id) for rs in rulesets],
+        "selected_rulesets": _selected_rulesets_summary(rulesets),
+        "short": short,
+        "long": long,
+        "search": _compact_search_result(search_result) if search_result else None,
+    }
+
+
+def persist_portfolio_validation(
+    session,
+    validation: dict,
+    *,
+    note: str = "",
+    promoted: bool = False,
+) -> None:
+    selected_ids = [int(item) for item in validation.get("selected_ruleset_ids") or []]
+    if not selected_ids:
+        return
+    compact = compact_validation_for_storage(validation, note=note, promoted=promoted)
+    for rs in session.query(RuleSet).filter(RuleSet.id.in_(selected_ids)).all():
+        params = dict(rs.parameters or {})
+        history = list(params.get("portfolio_validation_history") or [])
+        history.append(compact)
+        params["portfolio_validation_history"] = history[-10:]
+        params["portfolio_validation"] = compact
+        rs.parameters = params
+        metrics = dict(rs.performance_metrics or {})
+        metrics["portfolio_validation"] = compact
+        rs.performance_metrics = metrics
+
+
+def compact_validation_for_storage(validation: dict, *, note: str = "", promoted: bool = False) -> dict:
+    return {
+        "validation_id": validation.get("validation_id"),
+        "validated_at": validation.get("validated_at"),
+        "selection_source": validation.get("selection_source"),
+        "note": note,
+        "promoted": promoted,
+        "promoted_at": datetime.now(timezone.utc).isoformat() if promoted else None,
+        "status": validation.get("status"),
+        "targets": validation.get("targets"),
+        "options": validation.get("options"),
+        "selected_ruleset_ids": validation.get("selected_ruleset_ids") or [],
+        "selected_rulesets": validation.get("selected_rulesets") or [],
+        "short": validation.get("short", {}).get("portfolio"),
+        "long": validation.get("long", {}).get("portfolio"),
+    }
+
+
 def search_candidate_portfolios(session, payload: dict | None, cfg) -> dict:
     payload = payload or {}
     targets = normalize_targets(payload)
@@ -596,6 +740,76 @@ def _portfolio_candidate_summary(combo: tuple[dict, ...], targets: dict, initial
             }
             for item in combo
         ],
+    }
+
+
+def _normalize_ruleset_ids(raw: Any) -> list[int]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list):
+        return []
+    ids = []
+    for item in raw:
+        try:
+            ruleset_id = int(item)
+        except (TypeError, ValueError):
+            continue
+        if ruleset_id > 0 and ruleset_id not in ids:
+            ids.append(ruleset_id)
+    return ids
+
+
+def _selected_scope_conflicts(scopes: list[dict]) -> list[str]:
+    reasons = []
+    seen: dict[tuple[str, str], int] = {}
+    for scope in scopes:
+        key = (str(scope["symbol"]).upper(), str(scope["timeframe"]).lower())
+        previous = seen.get(key)
+        ruleset_id = int(scope["ruleset"].id)
+        if previous is not None and previous != ruleset_id:
+            reasons.append(
+                f"Selected rulesets #{previous} and #{ruleset_id} both target {key[0]}/{key[1]}."
+            )
+        seen[key] = ruleset_id
+    return reasons
+
+
+def _selected_rulesets_summary(rulesets: list[RuleSet]) -> list[dict]:
+    return [
+        {
+            "ruleset_id": int(rs.id),
+            "name": rs.name,
+            "status": rs.status,
+            "symbols": rs.symbols or [],
+            "timeframes": rs.timeframes or [],
+        }
+        for rs in rulesets
+    ]
+
+
+def _public_options(options: dict) -> dict:
+    return {
+        key: (value.isoformat() if isinstance(value, datetime) else value)
+        for key, value in options.items()
+        if key != "end_date" or value is not None
+    }
+
+
+def _compact_search_result(search_result: dict | None) -> dict | None:
+    if not search_result:
+        return None
+    best = search_result.get("best_passing")
+    return {
+        "candidate_count": search_result.get("candidate_count"),
+        "prefiltered_scope_count": search_result.get("prefiltered_scope_count"),
+        "best_passing": {
+            "score": best.get("score"),
+            "short": best.get("short"),
+            "long": best.get("long"),
+            "strategies": best.get("strategies"),
+        } if best else None,
     }
 
 

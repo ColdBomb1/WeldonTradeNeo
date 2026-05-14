@@ -120,6 +120,19 @@ def _deactivate_conflicting_active_rulesets(session, target: RuleSet, now: datet
     return deactivated_ids
 
 
+def _deactivate_conflicting_portfolio_rulesets(session, targets: list[RuleSet], now: datetime) -> list[int]:
+    selected_ids = {int(target.id) for target in targets}
+    deactivated_ids: set[int] = set()
+    for active in session.query(RuleSet).filter(RuleSet.status == "active").all():
+        if int(active.id) in selected_ids:
+            continue
+        if any(_ruleset_scopes_conflict(target, active) for target in targets):
+            active.status = "inactive"
+            active.updated_at = now
+            deactivated_ids.add(int(active.id))
+    return sorted(deactivated_ids)
+
+
 def _validation_criteria(payload: dict, rs: RuleSet, initial_balance: float) -> dict:
     cfg = load_config()
     params = rs.parameters or {}
@@ -665,6 +678,101 @@ async def search_portfolio_candidates(request: Request) -> JSONResponse:
         result = portfolio_milestone.search_candidate_portfolios(session, payload, cfg)
         status_code = 400 if result.get("error") else 200
         return JSONResponse(result, status_code=status_code)
+    finally:
+        session.close()
+
+
+@router.post("/api/rulesets/portfolio/validate")
+async def validate_portfolio_candidates(request: Request) -> JSONResponse:
+    payload = await request.json()
+    cfg = load_config()
+    session = get_session()
+    try:
+        result = portfolio_milestone.validate_portfolio(session, payload, cfg)
+        if _coerce_bool(payload.get("persist"), True):
+            portfolio_milestone.persist_portfolio_validation(
+                session,
+                result,
+                note=str(payload.get("note") or ""),
+                promoted=False,
+            )
+            session.commit()
+        status_code = 200 if result.get("status", {}).get("passed") else 400
+        return JSONResponse(result, status_code=status_code)
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
+@router.post("/api/rulesets/portfolio/promote")
+async def promote_portfolio_candidates(request: Request) -> JSONResponse:
+    payload = await request.json()
+    if not _coerce_bool(payload.get("confirm"), False):
+        return JSONResponse(
+            {"error": "Portfolio promotion requires confirm=true."},
+            status_code=400,
+        )
+    cfg = load_config()
+    session = get_session()
+    try:
+        validation = portfolio_milestone.validate_portfolio(session, payload, cfg)
+        if not validation.get("status", {}).get("passed"):
+            return JSONResponse(
+                {
+                    "error": "Portfolio validation failed; promotion blocked.",
+                    "validation": validation,
+                },
+                status_code=400,
+            )
+
+        selected_ids = [int(item) for item in validation.get("selected_ruleset_ids") or []]
+        targets = (
+            session.query(RuleSet)
+            .filter(RuleSet.id.in_(selected_ids))
+            .order_by(RuleSet.id.asc())
+            .all()
+        )
+        if len(targets) != len(selected_ids):
+            return JSONResponse({"error": "Selected ruleset list changed during promotion."}, status_code=400)
+
+        now = datetime.now(timezone.utc)
+        deactivated_ids = _deactivate_conflicting_portfolio_rulesets(session, targets, now)
+        portfolio_milestone.persist_portfolio_validation(
+            session,
+            validation,
+            note=str(payload.get("note") or "Portfolio-level milestone promotion."),
+            promoted=True,
+        )
+
+        promotion = {
+            "promoted_at": now.isoformat(),
+            "method": "portfolio_milestone_validation",
+            "validation_id": validation.get("validation_id"),
+            "selected_ruleset_ids": selected_ids,
+            "deactivated_conflicting_active_rulesets": deactivated_ids,
+            "targets": validation.get("targets"),
+            "short": validation.get("short", {}).get("portfolio"),
+            "long": validation.get("long", {}).get("portfolio"),
+        }
+        for rs in targets:
+            params = dict(rs.parameters or {})
+            params["portfolio_promotion"] = promotion
+            rs.parameters = params
+            rs.status = "active"
+            rs.updated_at = now
+        session.commit()
+        return JSONResponse({
+            "ok": True,
+            "status": "active",
+            "validation": validation,
+            "promoted_ruleset_ids": selected_ids,
+            "deactivated_conflicting_ruleset_ids": deactivated_ids,
+        })
+    except Exception:
+        session.rollback()
+        raise
     finally:
         session.close()
 

@@ -51,6 +51,8 @@
       <div class="button-wrap" style="align-self:flex-end">
         <button type="button" id="milestone-btn">Evaluate Active Milestone</button>
         <button type="button" id="search-btn">Search Candidate Pool</button>
+        <button type="button" id="validate-best-btn" disabled>Validate Best</button>
+        <button type="button" id="promote-best-btn" disabled>Promote Best</button>
       </div>
     </div>
     <div class="status-grid" id="milestone-grid" style="margin-top:12px">
@@ -127,6 +129,7 @@
 {% block scripts %}
 <script>
   let portfolioChart = null;
+  let lastBestPortfolio = null;
 
   const symbolColors = ['#29c8ff', '#35d48b', '#f6b94c', '#20d0b2', '#ff6475', '#6fe0ff', '#b6e9ff'];
 
@@ -307,6 +310,9 @@
   }
 
   function renderCandidateSearch(data) {
+    lastBestPortfolio = data.best_passing || null;
+    document.getElementById('validate-best-btn').disabled = !lastBestPortfolio;
+    document.getElementById('promote-best-btn').disabled = !lastBestPortfolio;
     const tbody = document.querySelector('#candidate-search-table tbody');
     tbody.innerHTML = '';
     const portfolios = data.top_portfolios || [];
@@ -383,6 +389,82 @@
     }
   }
 
+  function bestPortfolioIds() {
+    return (lastBestPortfolio?.strategies || []).map(s => s.ruleset_id).filter(Boolean);
+  }
+
+  async function validateBestPortfolio() {
+    const ids = bestPortfolioIds();
+    const msg = document.getElementById('milestone-msg');
+    if (!ids.length) {
+      msg.innerHTML = '<span style="color:#ff6475">Search first and select a passing portfolio.</span>';
+      return;
+    }
+    const btn = document.getElementById('validate-best-btn');
+    btn.disabled = true;
+    msg.textContent = 'Validating selected portfolio...';
+    try {
+      const body = {
+        ...baseMilestoneBody(),
+        ruleset_ids: ids,
+        persist: true,
+        note: 'Portfolio milestone validation from Portfolio Backtest page',
+      };
+      const resp = await fetch('/api/rulesets/portfolio/validate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.status?.passed) {
+        throw new Error(data.status?.reasons?.join(' ') || data.error || resp.statusText);
+      }
+      renderMilestone(data);
+      msg.textContent = `Validated portfolio ${data.validation_id}.`;
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
+    } finally {
+      btn.disabled = !lastBestPortfolio;
+    }
+  }
+
+  async function promoteBestPortfolio() {
+    const ids = bestPortfolioIds();
+    const msg = document.getElementById('milestone-msg');
+    if (!ids.length) {
+      msg.innerHTML = '<span style="color:#ff6475">Search first and select a passing portfolio.</span>';
+      return;
+    }
+    if (!confirm(`Promote portfolio rulesets ${ids.map(id => '#'+id).join(', ')} to active? Conflicting active rulesets will be deactivated.`)) {
+      return;
+    }
+    const btn = document.getElementById('promote-best-btn');
+    btn.disabled = true;
+    msg.textContent = 'Promoting selected portfolio...';
+    try {
+      const body = {
+        ...baseMilestoneBody(),
+        ruleset_ids: ids,
+        confirm: true,
+        note: 'Portfolio milestone promotion from Portfolio Backtest page',
+      };
+      const resp = await fetch('/api/rulesets/portfolio/promote', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.ok) throw new Error(data.error || resp.statusText);
+      renderMilestone(data.validation);
+      msg.textContent = `Promoted ${data.promoted_ruleset_ids.length} rulesets. Deactivated ${data.deactivated_conflicting_ruleset_ids.length} conflicting active rulesets.`;
+      runBacktest();
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
+    } finally {
+      btn.disabled = !lastBestPortfolio;
+    }
+  }
+
   async function runBacktest() {
     const btn = document.getElementById('run-btn');
     const msg = document.getElementById('status-msg');
@@ -422,6 +504,8 @@
   document.getElementById('run-btn').addEventListener('click', runBacktest);
   document.getElementById('milestone-btn').addEventListener('click', runMilestone);
   document.getElementById('search-btn').addEventListener('click', searchCandidates);
+  document.getElementById('validate-best-btn').addEventListener('click', validateBestPortfolio);
+  document.getElementById('promote-best-btn').addEventListener('click', promoteBestPortfolio);
   runBacktest();
   runMilestone();
 </script>
