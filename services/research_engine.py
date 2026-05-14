@@ -54,6 +54,11 @@ DEFAULT_SETTINGS = {
     "min_holdout_profit_factor": 1.15,
     "min_holdout_return_pct": 0.1,
     "min_holdout_profitable_test_ratio": 0.5,
+    "rolling_holdout_enabled": True,
+    "rolling_holdout_windows": 4,
+    "rolling_holdout_days": 14,
+    "rolling_holdout_step_days": 14,
+    "min_rolling_holdout_pass_ratio": 0.67,
     "cost_stress_multiplier": 1.5,
     "min_stress_profit_factor": 1.05,
     "min_stress_return_pct": 0.0,
@@ -149,6 +154,14 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["min_holdout_profit_factor"] = max(0.1, min(10.0, float(settings["min_holdout_profit_factor"])))
     settings["min_holdout_return_pct"] = max(-50.0, min(100.0, float(settings["min_holdout_return_pct"])))
     settings["min_holdout_profitable_test_ratio"] = max(0.0, min(1.0, float(settings["min_holdout_profitable_test_ratio"])))
+    settings["rolling_holdout_enabled"] = _coerce_bool(settings["rolling_holdout_enabled"])
+    settings["rolling_holdout_windows"] = max(1, min(12, int(settings["rolling_holdout_windows"])))
+    settings["rolling_holdout_days"] = max(1, min(120, int(settings["rolling_holdout_days"])))
+    settings["rolling_holdout_step_days"] = max(1, min(120, int(settings["rolling_holdout_step_days"])))
+    settings["min_rolling_holdout_pass_ratio"] = max(
+        0.0,
+        min(1.0, float(settings["min_rolling_holdout_pass_ratio"])),
+    )
     settings["cost_stress_multiplier"] = max(1.0, min(5.0, float(settings["cost_stress_multiplier"])))
     settings["min_stress_profit_factor"] = max(0.1, min(10.0, float(settings["min_stress_profit_factor"])))
     settings["min_stress_return_pct"] = max(-50.0, min(100.0, float(settings["min_stress_return_pct"])))
@@ -412,12 +425,19 @@ def _evaluate_candidate(
                 "reasons": ["Holdout enabled but no holdout windows were available."],
             }
 
+    rolling_holdout = None
+    rolling_holdout_gate = {"passed": True, "status": "passed", "reasons": []}
+    if settings["rolling_holdout_enabled"]:
+        rolling_holdout = evaluate_rolling_holdout(genome, group_candles, timeframe, settings)
+        rolling_holdout_gate = score_rolling_holdout(rolling_holdout, settings)
+
     gates = {
         "train": train_gate,
         "validation": validation_gate,
         "validation_stress": validation_stress_gate,
         "holdout": holdout_gate,
         "holdout_stress": holdout_stress_gate,
+        "rolling_holdout": rolling_holdout_gate,
     }
     reasons = _collect_gate_reasons(gates)
     return {
@@ -434,6 +454,7 @@ def _evaluate_candidate(
         "validation_stress_metrics": validation_stress,
         "holdout_metrics": holdout,
         "holdout_stress_metrics": holdout_stress,
+        "rolling_holdout_metrics": rolling_holdout,
         "gates": gates,
         "score": _candidate_selection_score(
             train=item["train_metrics"],
@@ -441,6 +462,7 @@ def _evaluate_candidate(
             validation_stress=validation_stress,
             holdout=holdout,
             holdout_stress=holdout_stress,
+            rolling_holdout=rolling_holdout,
         ),
         "passed": not reasons,
         "reasons": reasons,
@@ -457,7 +479,7 @@ def evaluate_genome(
     spread_multiplier: float = 1.0,
 ) -> dict:
     results: list[tuple[str, BacktestResults]] = []
-    min_bars = 40 if split == "holdout" else 80
+    min_bars = 40 if split in {"holdout", "rolling_holdout"} else 80
     for symbol, candles in candles_by_symbol.items():
         for start, end in windows_by_symbol[symbol][split]:
             window_candles = candles[start:end]
@@ -481,6 +503,64 @@ def evaluate_genome(
             )
             results.append((symbol, run_backtest(config, window_candles)))
     return aggregate_results(results, settings)
+
+
+def evaluate_rolling_holdout(
+    genome: dict,
+    candles_by_symbol: dict[str, list[dict]],
+    timeframe: str,
+    settings: dict,
+) -> dict:
+    results: list[tuple[str, BacktestResults]] = []
+    window_summaries: list[dict] = []
+    for symbol, candles in candles_by_symbol.items():
+        for window in _build_rolling_holdout_windows(candles, settings):
+            window_candles = candles[window["start_idx"]:window["end_idx"]]
+            if len(window_candles) < int(settings["min_holdout_bars"]):
+                continue
+            config = BacktestConfig(
+                symbol=symbol,
+                timeframe=timeframe,
+                strategy_type="research_genome",
+                parameters=genome,
+                start_date=_parse_dt(window_candles[0]["time"]),
+                end_date=_parse_dt(window_candles[-1]["time"]),
+                initial_balance=settings["initial_balance"],
+                spread_pips=float(settings["spread_pips"]),
+                pip_value=0.01 if "JPY" in symbol.upper() else 0.0001,
+                lot_type=settings["lot_type"],
+                risk_per_trade_pct=settings["risk_per_trade_pct"],
+                sl_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)),
+                tp_atr_multiplier=float(genome.get("sl_atr_multiplier", 2.0)) * float(genome.get("tp_rr", 1.7)),
+                monthly_max_loss_pct=settings["max_drawdown_pct"],
+            )
+            result = run_backtest(config, window_candles)
+            results.append((symbol, result))
+            metrics = aggregate_results([(symbol, result)], settings)
+            gate = score_holdout(metrics, settings)
+            window_summaries.append({
+                "symbol": symbol,
+                "window": window["window"],
+                "start": window_candles[0]["time"],
+                "end": window_candles[-1]["time"],
+                "bars": len(window_candles),
+                "return_pct": metrics["return_pct"],
+                "profit_factor": metrics["profit_factor"],
+                "max_drawdown": metrics["max_drawdown"],
+                "total_trades": metrics["total_trades"],
+                "win_rate": metrics["win_rate"],
+                "passed": gate["passed"],
+                "reasons": gate["reasons"],
+            })
+
+    metrics = aggregate_results(results, settings)
+    passes = sum(1 for item in window_summaries if item["passed"])
+    count = len(window_summaries)
+    metrics["rolling_window_count"] = count
+    metrics["rolling_window_passes"] = passes
+    metrics["rolling_window_pass_ratio"] = round(passes / count, 3) if count else 0.0
+    metrics["rolling_windows"] = window_summaries
+    return metrics
 
 
 def aggregate_results(results: list[tuple[str, BacktestResults]], settings: dict) -> dict:
@@ -613,6 +693,29 @@ def score_holdout(metrics: dict, settings: dict) -> dict:
     )
 
 
+def score_rolling_holdout(metrics: dict, settings: dict) -> dict:
+    reasons = []
+    count = int(metrics.get("rolling_window_count") or 0)
+    expected = int(settings["rolling_holdout_windows"])
+    pass_ratio = float(metrics.get("rolling_window_pass_ratio") or 0.0)
+    min_pass_ratio = float(settings["min_rolling_holdout_pass_ratio"])
+    if count < expected:
+        reasons.append(f"Rolling holdout windows {count} below {expected}.")
+    if pass_ratio < min_pass_ratio:
+        reasons.append(f"Rolling holdout pass ratio {pass_ratio:.2f} below {min_pass_ratio:.2f}.")
+    aggregate_gate = _score_split(
+        "Rolling holdout",
+        metrics,
+        settings,
+        min_trades=int(settings["min_holdout_trades"]) * max(1, count),
+        min_profit_factor=float(settings["min_holdout_profit_factor"]),
+        min_return_pct=float(settings["min_holdout_return_pct"]),
+        min_profitable_test_ratio=min_pass_ratio,
+    )
+    reasons.extend(aggregate_gate["reasons"])
+    return {"passed": not reasons, "status": "passed" if not reasons else "failed", "reasons": reasons}
+
+
 def score_cost_stress(metrics: dict, settings: dict, label: str) -> dict:
     reasons = []
     if metrics["max_drawdown"] > float(settings["max_drawdown_pct"]) / 100.0:
@@ -677,6 +780,7 @@ def _candidate_selection_score(
     validation_stress: dict | None,
     holdout: dict | None,
     holdout_stress: dict | None,
+    rolling_holdout: dict | None = None,
 ) -> float:
     weighted_score = train.get("score", 0.0) * 0.20 + validation.get("score", 0.0) * 0.35
     weight = 0.55
@@ -689,6 +793,9 @@ def _candidate_selection_score(
     if holdout_stress:
         weighted_score += holdout_stress.get("score", 0.0) * 0.25
         weight += 0.25
+    if rolling_holdout:
+        weighted_score += rolling_holdout.get("score", 0.0) * 0.30
+        weight += 0.30
     return round(weighted_score / weight, 4)
 
 
@@ -856,6 +963,48 @@ def _find_holdout_start(candles: list[dict], settings: dict) -> int | None:
     return None
 
 
+def _build_rolling_holdout_windows(candles: list[dict], settings: dict) -> list[dict]:
+    if not candles:
+        return []
+    try:
+        last_ts = _parse_dt(candles[-1]["time"])
+    except Exception:
+        logger.warning("Unable to build rolling holdout windows", exc_info=True)
+        return []
+
+    windows = []
+    window_days = int(settings.get("rolling_holdout_days") or settings.get("holdout_days") or 14)
+    step_days = int(settings.get("rolling_holdout_step_days") or window_days)
+    requested = int(settings.get("rolling_holdout_windows") or 1)
+    min_bars = int(settings.get("min_holdout_bars", 60))
+    for window_idx in range(requested):
+        end_ts = last_ts - timedelta(days=step_days * window_idx)
+        start_ts = end_ts - timedelta(days=window_days)
+        start_idx = None
+        end_idx = None
+        for idx, candle in enumerate(candles):
+            ts = _parse_dt(candle["time"])
+            if start_idx is None and ts >= start_ts:
+                start_idx = idx
+            if ts <= end_ts:
+                end_idx = idx + 1
+            elif start_idx is not None:
+                break
+        if start_idx is None or end_idx is None or end_idx <= start_idx:
+            continue
+        if end_idx - start_idx < min_bars:
+            continue
+        windows.append({
+            "window": window_idx,
+            "start_idx": start_idx,
+            "end_idx": end_idx,
+            "start": candles[start_idx]["time"],
+            "end": candles[end_idx - 1]["time"],
+            "bars": end_idx - start_idx,
+        })
+    return windows
+
+
 def _window_summary(candles: list[dict], windows: dict[str, list[tuple[int, int]]]) -> dict:
     summary: dict[str, list[dict]] = {}
     for split, ranges in windows.items():
@@ -972,6 +1121,7 @@ def _ai_review(result: dict) -> dict | None:
             "validation_stress_metrics": result["best_candidate"].get("validation_stress_metrics"),
             "holdout_metrics": result["best_candidate"].get("holdout_metrics"),
             "holdout_stress_metrics": result["best_candidate"].get("holdout_stress_metrics"),
+            "rolling_holdout_metrics": result["best_candidate"].get("rolling_holdout_metrics"),
             "gates": result["best_candidate"].get("gates", {}),
             "symbol_group": result["best_candidate"].get("symbol_group"),
             "symbols": result["best_candidate"].get("symbols", []),

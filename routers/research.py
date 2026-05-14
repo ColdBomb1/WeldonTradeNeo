@@ -105,6 +105,7 @@ def get_research_run(run_id: int) -> JSONResponse:
                     "validation_stress_metrics": result_candidates.get(c.rank, {}).get("validation_stress_metrics"),
                     "holdout_metrics": result_candidates.get(c.rank, {}).get("holdout_metrics"),
                     "holdout_stress_metrics": result_candidates.get(c.rank, {}).get("holdout_stress_metrics"),
+                    "rolling_holdout_metrics": result_candidates.get(c.rank, {}).get("rolling_holdout_metrics"),
                     "symbol_group": result_candidates.get(c.rank, {}).get("symbol_group"),
                     "symbols": result_candidates.get(c.rank, {}).get("symbols"),
                     "group_rank": result_candidates.get(c.rank, {}).get("group_rank"),
@@ -314,6 +315,7 @@ def _candidate_to_ruleset(run_id: int, item: dict, result: dict, run: ResearchRu
             "validation_stress": item.get("validation_stress_metrics"),
             "holdout": item.get("holdout_metrics"),
             "holdout_stress": item.get("holdout_stress_metrics"),
+            "rolling_holdout": item.get("rolling_holdout_metrics"),
         },
     }
     genome = item.get("genome") or {}
@@ -348,6 +350,7 @@ def _candidate_to_ruleset(run_id: int, item: dict, result: dict, run: ResearchRu
             "validation_stress_metrics": item.get("validation_stress_metrics"),
             "holdout_metrics": item.get("holdout_metrics"),
             "holdout_stress_metrics": item.get("holdout_stress_metrics"),
+            "rolling_holdout_metrics": item.get("rolling_holdout_metrics"),
             "gates": item.get("gates", {}),
             "failure_reasons": item.get("reasons", []),
             "validated": validation["passed"],
