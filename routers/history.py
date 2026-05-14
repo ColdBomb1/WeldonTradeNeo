@@ -10,6 +10,7 @@ from fastapi.templating import Jinja2Templates
 from config import load_config
 from db import get_session
 from models import AccountSnapshot, HistoryTick, Tick, TradeExecution, TradeRecommendation, TradeUpdate
+from services.performance_archive import filter_query_after_cutoff
 
 router = APIRouter(tags=["history"])
 
@@ -103,6 +104,7 @@ def history_data(symbol: str, timeframe: str = "live") -> JSONResponse:
 def account_performance(server_id: str | None = None) -> JSONResponse:
     session = get_session()
     query = session.query(AccountSnapshot).order_by(AccountSnapshot.ts.asc())
+    query = filter_query_after_cutoff(query, AccountSnapshot.ts)
     if server_id:
         query = query.filter(AccountSnapshot.server_id == server_id)
     rows = query.limit(2000).all()

@@ -10,6 +10,7 @@ from pydantic import BaseModel
 
 from config import AccountConfig, TradingBlackout, CONFIG_PATH, load_config, save_config
 from services import mt5_trade_service
+from services.performance_archive import after_cutoff, filter_query_after_cutoff
 
 router = APIRouter(tags=["accounts"])
 
@@ -521,7 +522,7 @@ def get_trade_history() -> JSONResponse:
     if cache_age > 60:
         thread = threading.Thread(target=_refresh_deals_cache, daemon=True)
         thread.start()
-    return JSONResponse({"deals": _deals_cache})
+    return JSONResponse({"deals": [d for d in _deals_cache if after_cutoff(d.get("time"))]})
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +686,7 @@ def get_account_equity_history(account_name: str, days: int = 0) -> JSONResponse
         query = session.query(AccountSnapshot).filter(
             AccountSnapshot.account_name == account_name,
         )
+        query = filter_query_after_cutoff(query, AccountSnapshot.ts)
         if days > 0:
             cutoff = datetime.now(timezone.utc) - timedelta(days=days)
             query = query.filter(AccountSnapshot.ts >= cutoff)
@@ -710,7 +712,9 @@ def get_account_trade_list(account_name: str, limit: int = 50) -> JSONResponse:
     try:
         broker_deals = session.query(AccountDeal).filter(
             AccountDeal.account_name == account_name,
-        ).order_by(AccountDeal.closed_at.desc()).limit(limit).all()
+        )
+        broker_deals = filter_query_after_cutoff(broker_deals, AccountDeal.closed_at)
+        broker_deals = broker_deals.order_by(AccountDeal.closed_at.desc()).limit(limit).all()
         for d in broker_deals:
             result_trades.append({
                 "symbol": _normalize_symbol(d.symbol), "side": d.side,

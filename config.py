@@ -170,6 +170,7 @@ class AppConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     news: NewsConfig = Field(default_factory=NewsConfig)
     training: TrainingConfig = Field(default_factory=TrainingConfig)
+    performance_archive_cutoff: str = ""
 
     @field_validator("symbols", mode="before")
     @classmethod

@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% set active_page = "portfolio_backtest" %}
+
+{% block title %}Portfolio Backtest - WeldonTrader{% endblock %}
+
+{% block head %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+{% endblock %}
+
+{% block content %}
+<header>
+  <h1>Portfolio Backtest</h1>
+  <p>Backtest the active production portfolio over the recent window and compare combined vs per-symbol performance.</p>
+</header>
+<main>
+  <section class="card">
+    <h2>Run Current Portfolio</h2>
+    <div class="row">
+      <label>Window Days <input type="number" id="days" min="1" max="120" value="14" /></label>
+      <label>Initial Balance <input type="number" id="initial-balance" min="1000" step="1000" value="{{ initial_balance }}" /></label>
+      <label>End Date <input type="datetime-local" id="end-date" /></label>
+      <label>Realistic Costs <input type="checkbox" id="realistic" checked /></label>
+      <label>Slippage Pips <input type="number" id="slippage" min="0" max="10" step="0.1" value="0.2" /></label>
+      <label>Min SL Pips <input type="number" id="min-sl" min="0" max="100" step="0.5" value="10" /></label>
+      <div class="button-wrap" style="align-self:flex-end">
+        <button type="button" id="run-btn">Backtest Current Portfolio</button>
+      </div>
+    </div>
+    <p class="small" id="status-msg"></p>
+  </section>
+
+  <section class="card">
+    <h2>Portfolio Summary</h2>
+    <div class="status-grid" id="summary-grid">
+      <div class="status-item"><span class="status-label">Return</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">P&L</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">Trades</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">PF</span><span class="status-value">--</span></div>
+      <div class="status-item"><span class="status-label">Max DD</span><span class="status-value">--</span></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Combined and Symbol P&L</h2>
+    <div class="chart-wrap">
+      <canvas id="portfolio-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Active Strategy Breakdown</h2>
+    <table class="table" id="strategy-table">
+      <thead>
+        <tr>
+          <th>Strategy</th>
+          <th>Symbol</th>
+          <th>TF</th>
+          <th>Return</th>
+          <th>P&L</th>
+          <th>Trades</th>
+          <th>Win Rate</th>
+          <th>PF</th>
+          <th>Max DD</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="9" class="small">Run a portfolio backtest.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>Backtest Trades</h2>
+    <table class="table" id="trades-table">
+      <thead>
+        <tr>
+          <th>Exit</th>
+          <th>Strategy</th>
+          <th>Symbol</th>
+          <th>Side</th>
+          <th>Entry</th>
+          <th>Exit Price</th>
+          <th>Volume</th>
+          <th>P&L</th>
+          <th>Exit Type</th>
+        </tr>
+      </thead>
+      <tbody><tr><td colspan="9" class="small">Run a portfolio backtest.</td></tr></tbody>
+    </table>
+  </section>
+</main>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  let portfolioChart = null;
+
+  const symbolColors = ['#29c8ff', '#35d48b', '#f6b94c', '#20d0b2', '#ff6475', '#6fe0ff', '#b6e9ff'];
+
+  function fmtMoney(value) {
+    if (value == null || isNaN(Number(value))) return '--';
+    const n = Number(value);
+    const color = n >= 0 ? '#35d48b' : '#ff6475';
+    return `<span style="color:${color};font-weight:700">${n >= 0 ? '+' : ''}$${n.toFixed(2)}</span>`;
+  }
+
+  function fmtPct(value, alreadyPct = false) {
+    if (value == null || isNaN(Number(value))) return '--';
+    const n = alreadyPct ? Number(value) : Number(value) * 100;
+    const color = n >= 0 ? '#35d48b' : '#ff6475';
+    return `<span style="color:${color};font-weight:700">${n >= 0 ? '+' : ''}${n.toFixed(2)}%</span>`;
+  }
+
+  function fmtTime(value) {
+    return value ? new Date(value).toLocaleString() : '--';
+  }
+
+  function labelsFrom(points) {
+    return (points || []).map(p => p.time);
+  }
+
+  function alignSeries(points, labels) {
+    const sorted = [...(points || [])].sort((a, b) => String(a.time).localeCompare(String(b.time)));
+    const out = [];
+    let idx = 0;
+    let last = 0;
+    labels.forEach(label => {
+      while (idx < sorted.length && String(sorted[idx].time) <= String(label)) {
+        last = Number(sorted[idx].pnl || 0);
+        idx += 1;
+      }
+      out.push(last);
+    });
+    return out;
+  }
+
+  function renderSummary(portfolio) {
+    const grid = document.getElementById('summary-grid');
+    grid.innerHTML = `
+      <div class="status-item"><span class="status-label">Return</span><span class="status-value">${fmtPct(portfolio.return_pct, true)}</span></div>
+      <div class="status-item"><span class="status-label">P&L</span><span class="status-value">${fmtMoney(portfolio.pnl)}</span></div>
+      <div class="status-item"><span class="status-label">Trades</span><span class="status-value">${portfolio.total_trades || 0}</span></div>
+      <div class="status-item"><span class="status-label">Win Rate</span><span class="status-value">${fmtPct(portfolio.win_rate || 0)}</span></div>
+      <div class="status-item"><span class="status-label">PF</span><span class="status-value">${portfolio.profit_factor ?? '--'}</span></div>
+      <div class="status-item"><span class="status-label">Max DD</span><span class="status-value">${fmtPct(-(portfolio.max_drawdown_pct || 0), true)}</span></div>
+    `;
+  }
+
+  function renderChart(data) {
+    const combined = data.combined_curve || data.combined_pnl_curve || [];
+    const labels = labelsFrom(combined);
+    const displayLabels = labels.map(t => new Date(t).toLocaleDateString());
+    const datasets = [{
+      label: 'Combined',
+      data: combined.map(p => Number(p.pnl || 0)),
+      borderColor: '#29c8ff',
+      backgroundColor: 'rgba(41,200,255,0.14)',
+      borderWidth: 3,
+      tension: 0.2,
+      pointRadius: 0,
+      fill: true,
+    }];
+
+    (data.symbol_curves || []).forEach((row, idx) => {
+      datasets.push({
+        label: row.symbol,
+        data: alignSeries(row.points || [], labels),
+        borderColor: symbolColors[idx % symbolColors.length],
+        borderWidth: 2,
+        tension: 0.2,
+        pointRadius: 0,
+        fill: false,
+      });
+    });
+
+    const ctx = document.getElementById('portfolio-chart').getContext('2d');
+    if (portfolioChart) portfolioChart.destroy();
+    portfolioChart = new Chart(ctx, {
+      type: 'line',
+      data: { labels: displayLabels, datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { labels: { boxWidth: 18 } } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 12 } },
+          y: { title: { display: true, text: 'P&L' } },
+        },
+      },
+    });
+  }
+
+  function renderStrategies(strategies) {
+    const tbody = document.querySelector('#strategy-table tbody');
+    tbody.innerHTML = '';
+    if (!strategies.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No active structured strategies were backtested.</td></tr>';
+      return;
+    }
+    strategies.forEach(s => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td><strong>${s.name}</strong><br><span class="small">#${s.ruleset_id}</span></td>
+        <td>${s.symbol}</td>
+        <td>${s.timeframe}</td>
+        <td>${fmtPct(s.return_pct, true)}</td>
+        <td>${fmtMoney(s.pnl)}</td>
+        <td>${s.total_trades}</td>
+        <td>${fmtPct(s.win_rate || 0)}</td>
+        <td>${s.profit_factor ?? '--'}</td>
+        <td>${fmtPct(-(s.max_drawdown_pct || 0), true)}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  function renderTrades(trades) {
+    const tbody = document.querySelector('#trades-table tbody');
+    tbody.innerHTML = '';
+    if (!trades.length) {
+      tbody.innerHTML = '<tr><td colspan="9" class="small">No trades in this backtest window.</td></tr>';
+      return;
+    }
+    trades.slice().reverse().forEach(t => {
+      const row = document.createElement('tr');
+      row.innerHTML = `
+        <td>${fmtTime(t.exit_ts)}</td>
+        <td>${t.ruleset_name || '--'}</td>
+        <td>${t.symbol || '--'}</td>
+        <td>${t.side || '--'}</td>
+        <td>${Number(t.entry_price || 0).toFixed((t.symbol || '').includes('JPY') ? 3 : 5)}</td>
+        <td>${Number(t.exit_price || 0).toFixed((t.symbol || '').includes('JPY') ? 3 : 5)}</td>
+        <td>${t.volume ?? '--'}</td>
+        <td>${fmtMoney(t.pnl)}</td>
+        <td>${t.exit_type || '--'}</td>
+      `;
+      tbody.appendChild(row);
+    });
+  }
+
+  async function runBacktest() {
+    const btn = document.getElementById('run-btn');
+    const msg = document.getElementById('status-msg');
+    btn.disabled = true;
+    btn.textContent = 'Running...';
+    msg.textContent = 'Running portfolio backtest...';
+    try {
+      const endValue = document.getElementById('end-date').value;
+      const body = {
+        days: parseInt(document.getElementById('days').value) || 14,
+        initial_balance: parseFloat(document.getElementById('initial-balance').value) || 100000,
+        realistic: document.getElementById('realistic').checked,
+        slippage_pips: parseFloat(document.getElementById('slippage').value) || 0,
+        min_sl_pips: parseFloat(document.getElementById('min-sl').value) || 0,
+      };
+      if (endValue) body.end_date = new Date(endValue).toISOString();
+      const resp = await fetch('/api/rulesets/portfolio/backtest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) throw new Error(data.error || resp.statusText);
+      renderSummary(data.portfolio || {});
+      renderChart(data);
+      renderStrategies(data.strategies || []);
+      renderTrades(data.trades || []);
+      msg.textContent = `Backtested ${data.portfolio.total_trades || 0} trades from ${fmtTime(data.portfolio.window_start)} to ${fmtTime(data.portfolio.window_end)}.`;
+    } catch (e) {
+      msg.innerHTML = `<span style="color:#ff6475">${e.message}</span>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Backtest Current Portfolio';
+    }
+  }
+
+  document.getElementById('run-btn').addEventListener('click', runBacktest);
+  runBacktest();
+</script>
+{% endblock %}

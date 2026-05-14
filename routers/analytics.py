@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
 from config import load_config
-from services import ai_service, performance_service, risk_manager
+from services import ai_service, performance_archive, performance_service, risk_manager
 
 router = APIRouter(tags=["analytics"])
 
@@ -61,6 +61,23 @@ def get_signal_accuracy() -> JSONResponse:
 def get_risk_summary() -> JSONResponse:
     summary = risk_manager.get_risk_summary()
     return JSONResponse(summary)
+
+
+@router.get("/api/analytics/archive-status")
+def get_archive_status() -> JSONResponse:
+    return JSONResponse(performance_archive.archive_status())
+
+
+@router.post("/api/analytics/archive-current")
+async def archive_current_performance(request: Request) -> JSONResponse:
+    payload = await request.json()
+    note = str(payload.get("note") or "Baseline reset").strip()
+    return JSONResponse({"ok": True, "archive": performance_archive.archive_current_performance(note=note)})
+
+
+@router.post("/api/analytics/archive-clear")
+def clear_archive_cutoff() -> JSONResponse:
+    return JSONResponse(performance_archive.clear_archive_cutoff())
 
 
 @router.get("/api/analytics/live-vs-backtest")

@@ -12,6 +12,7 @@ from config import load_config
 from db import get_session
 from models.signal import LiveTrade
 from services import trade_manager
+from services.performance_archive import filter_query_after_cutoff
 
 router = APIRouter(tags=["trades"])
 
@@ -60,6 +61,7 @@ def get_trades(
             # For closed trades, use AccountDeal (broker truth) as the single source.
             # This avoids duplicates from LiveTrade records with calculated PnL.
             query = session.query(AccountDeal).order_by(AccountDeal.closed_at.desc())
+            query = filter_query_after_cutoff(query, AccountDeal.closed_at)
             if symbol:
                 query = query.filter(AccountDeal.symbol == symbol)
             deals = query.limit(min(limit, 500)).all()
@@ -104,7 +106,9 @@ def get_trade_summary() -> JSONResponse:
             LiveTrade.status == "closed",
             LiveTrade.closed_at >= today_start,
         ).all()
-        all_closed = session.query(LiveTrade).filter(LiveTrade.status == "closed").all()
+        all_closed_query = session.query(LiveTrade).filter(LiveTrade.status == "closed")
+        all_closed_query = filter_query_after_cutoff(all_closed_query, LiveTrade.closed_at)
+        all_closed = all_closed_query.all()
 
         unrealized_pnl = sum(t.pnl or 0 for t in open_trades)
         daily_pnl = sum(t.pnl or 0 for t in closed_today)

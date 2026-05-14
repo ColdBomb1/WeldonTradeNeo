@@ -14,6 +14,24 @@
 </header>
 <main>
   <section class="card">
+    <h2>Performance Baseline</h2>
+    <div class="status-grid" id="archive-grid">
+      <div class="status-item"><span class="status-label">Archive Cutoff</span><span class="status-value" id="archive-cutoff">--</span></div>
+      <div class="status-item"><span class="status-label">Current Trades</span><span class="status-value" id="archive-trades">--</span></div>
+      <div class="status-item"><span class="status-label">Current P&L</span><span class="status-value" id="archive-pnl">--</span></div>
+      <div class="status-item"><span class="status-label">Archives</span><span class="status-value" id="archive-count">--</span></div>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <label>Archive Note <input id="archive-note" value="Baseline reset after strategy/process changes" /></label>
+      <div class="button-wrap" style="gap:8px;align-self:flex-end;flex-wrap:wrap">
+        <button type="button" id="archive-btn">Archive Current Results</button>
+        <button type="button" id="clear-archive-btn" class="btn-outline">Clear Baseline Filter</button>
+      </div>
+    </div>
+    <p class="small" id="archive-msg"></p>
+  </section>
+
+  <section class="card">
     <h2>Equity Curve</h2>
     <div class="chart-wrap">
       <canvas id="equity-chart"></canvas>
@@ -113,11 +131,42 @@
     return `<span style="color:${color}">${(val * 100).toFixed(1)}%</span>`;
   }
 
+  function fmtTime(value) {
+    return value ? new Date(value).toLocaleString() : '--';
+  }
+
+  async function loadArchiveStatus() {
+    const resp = await fetch('/api/analytics/archive-status');
+    const data = await resp.json();
+    const current = data.current_window || {};
+    document.getElementById('archive-cutoff').textContent = data.cutoff ? fmtTime(data.cutoff) : 'None';
+    document.getElementById('archive-trades').textContent = current.account_deals ?? current.live_trades ?? 0;
+    document.getElementById('archive-pnl').innerHTML = pnlColor(current.account_deal_pnl ?? current.live_pnl ?? 0);
+    document.getElementById('archive-count').textContent = (data.archives || []).length;
+  }
+
+  async function reloadPerformanceViews() {
+    await Promise.allSettled([
+      loadArchiveStatus(),
+      loadEquityCurve(),
+      loadDailyPnl(),
+      loadStrategies(),
+      loadSymbols(),
+      loadRisk(),
+    ]);
+  }
+
   async function loadEquityCurve() {
     const resp = await fetch('/api/analytics/equity-curve');
     const data = await resp.json();
     const curve = data.curve || [];
-    if (!curve.length) return;
+    if (!curve.length) {
+      if (equityChart) {
+        equityChart.destroy();
+        equityChart = null;
+      }
+      return;
+    }
 
     const ctx = document.getElementById('equity-chart').getContext('2d');
     if (equityChart) equityChart.destroy();
@@ -147,7 +196,13 @@
     const resp = await fetch('/api/analytics/daily-pnl?days=30');
     const data = await resp.json();
     const daily = data.daily_pnl || [];
-    if (!daily.length) return;
+    if (!daily.length) {
+      if (dailyChart) {
+        dailyChart.destroy();
+        dailyChart = null;
+      }
+      return;
+    }
 
     const ctx = document.getElementById('daily-chart').getContext('2d');
     if (dailyChart) dailyChart.destroy();
@@ -281,10 +336,32 @@
     output.textContent = text || JSON.stringify(a, null, 2);
   });
 
-  loadEquityCurve();
-  loadDailyPnl();
-  loadStrategies();
-  loadSymbols();
-  loadRisk();
+  document.getElementById('archive-btn').addEventListener('click', async () => {
+    if (!confirm('Archive current closed trade performance and reset the visible performance baseline? This does not delete broker history.')) return;
+    const msg = document.getElementById('archive-msg');
+    msg.textContent = 'Archiving current performance...';
+    const resp = await fetch('/api/analytics/archive-current', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ note: document.getElementById('archive-note').value }),
+    });
+    const data = await resp.json();
+    if (!resp.ok || data.error) {
+      msg.innerHTML = `<span style="color:#ff6475">${data.error || resp.statusText}</span>`;
+      return;
+    }
+    msg.textContent = `Archived ${data.archive.account_deals.count} broker deals through ${fmtTime(data.archive.archived_at)}.`;
+    reloadPerformanceViews();
+  });
+
+  document.getElementById('clear-archive-btn').addEventListener('click', async () => {
+    if (!confirm('Clear the performance baseline filter and show all retained history again?')) return;
+    const resp = await fetch('/api/analytics/archive-clear', { method: 'POST' });
+    const data = await resp.json();
+    document.getElementById('archive-msg').textContent = data.ok ? 'Baseline filter cleared.' : 'Could not clear baseline.';
+    reloadPerformanceViews();
+  });
+
+  reloadPerformanceViews();
 </script>
 {% endblock %}

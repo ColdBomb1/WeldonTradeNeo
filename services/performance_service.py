@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from db import get_session
 from models.signal import Signal, LiveTrade
 from models.trade_plan import BacktestRun
+from services.performance_archive import filter_query_after_cutoff
 
 logger = logging.getLogger(__name__)
 
@@ -18,11 +19,12 @@ def get_daily_pnl(days: int = 30) -> list[dict]:
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     session = get_session()
     try:
-        trades = session.query(LiveTrade).filter(
+        query = session.query(LiveTrade).filter(
             LiveTrade.status == "closed",
-            LiveTrade.closed_at >= cutoff,
             LiveTrade.pnl.isnot(None),
-        ).order_by(LiveTrade.closed_at.asc()).all()
+        )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        trades = query.filter(LiveTrade.closed_at >= cutoff).order_by(LiveTrade.closed_at.asc()).all()
 
         daily = defaultdict(lambda: {"pnl": 0.0, "trades": 0, "wins": 0})
         for t in trades:
@@ -51,12 +53,13 @@ def get_strategy_scorecard() -> list[dict]:
     session = get_session()
     try:
         # Get all closed trades joined with their signals for strategy info
-        trades = (
+        query = (
             session.query(LiveTrade, Signal)
             .join(Signal, LiveTrade.signal_id == Signal.id)
             .filter(LiveTrade.status == "closed", LiveTrade.pnl.isnot(None))
-            .all()
         )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        trades = query.all()
 
         by_strategy = defaultdict(lambda: {
             "trades": 0, "wins": 0, "losses": 0,
@@ -123,10 +126,12 @@ def get_equity_curve() -> list[dict]:
     """Build an equity curve from closed trades in chronological order."""
     session = get_session()
     try:
-        trades = session.query(LiveTrade).filter(
+        query = session.query(LiveTrade).filter(
             LiveTrade.status == "closed",
             LiveTrade.pnl.isnot(None),
-        ).order_by(LiveTrade.closed_at.asc()).all()
+        )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        trades = query.order_by(LiveTrade.closed_at.asc()).all()
 
         curve = []
         running = 0.0
@@ -155,7 +160,7 @@ def get_live_vs_backtest(strategy_type: str, symbol: str) -> dict:
     session = get_session()
     try:
         # Live stats
-        live_trades = (
+        query = (
             session.query(LiveTrade, Signal)
             .join(Signal, LiveTrade.signal_id == Signal.id)
             .filter(
@@ -164,8 +169,9 @@ def get_live_vs_backtest(strategy_type: str, symbol: str) -> dict:
                 Signal.strategy_type == strategy_type,
                 Signal.symbol == symbol,
             )
-            .all()
         )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        live_trades = query.all()
 
         live_total = len(live_trades)
         live_wins = sum(1 for t, _ in live_trades if t.pnl > 0)
@@ -225,10 +231,12 @@ def get_symbol_breakdown() -> list[dict]:
     """P&L breakdown by symbol."""
     session = get_session()
     try:
-        trades = session.query(LiveTrade).filter(
+        query = session.query(LiveTrade).filter(
             LiveTrade.status == "closed",
             LiveTrade.pnl.isnot(None),
-        ).all()
+        )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        trades = query.all()
 
         by_symbol = defaultdict(lambda: {"trades": 0, "wins": 0, "pnl": 0.0})
         for t in trades:
@@ -256,7 +264,7 @@ def get_signal_accuracy() -> dict:
     """Analyze signal confirmation quality — did Claude's confidence predict outcomes?"""
     session = get_session()
     try:
-        results = (
+        query = (
             session.query(Signal, LiveTrade)
             .join(LiveTrade, LiveTrade.signal_id == Signal.id)
             .filter(
@@ -264,8 +272,9 @@ def get_signal_accuracy() -> dict:
                 LiveTrade.pnl.isnot(None),
                 Signal.confidence.isnot(None),
             )
-            .all()
         )
+        query = filter_query_after_cutoff(query, LiveTrade.closed_at)
+        results = query.all()
 
         if not results:
             return {"total": 0}

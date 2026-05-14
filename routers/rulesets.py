@@ -278,7 +278,7 @@ def _combine_equity_curves(
     starting_balance_by_key: dict[str, float],
     initial_balance: float,
 ) -> list[dict]:
-    times = sorted({point["time"] for curve in curves_by_key.values() for point in curve})
+    times = sorted({point["time"] for curve in curves_by_key.values() for point in curve}, key=_parse_dt)
     last_equity = {
         key: float(starting_balance_by_key.get(key, initial_balance))
         for key in curves_by_key
@@ -288,7 +288,7 @@ def _combine_equity_curves(
     for ts in times:
         for key, curve in curves_by_key.items():
             idx = index_by_key[key]
-            while idx < len(curve) and curve[idx]["time"] <= ts:
+            while idx < len(curve) and _parse_dt(curve[idx]["time"]) <= _parse_dt(ts):
                 last_equity[key] = float(curve[idx]["equity"])
                 idx += 1
             index_by_key[key] = idx
@@ -297,6 +297,34 @@ def _combine_equity_curves(
             for key, equity in last_equity.items()
         )
         combined.append({"time": ts, "equity": round(equity, 2)})
+    return combined
+
+
+def _combine_pnl_curves(
+    curves_by_key: dict[str, list[dict]],
+    starting_balance_by_key: dict[str, float],
+) -> list[dict]:
+    times = sorted({point["time"] for curve in curves_by_key.values() for point in curve}, key=_parse_dt)
+    if not times:
+        return []
+    last_equity = {
+        key: float(starting_balance_by_key.get(key, 0.0))
+        for key in curves_by_key
+    }
+    index_by_key = {key: 0 for key in curves_by_key}
+    combined = []
+    for ts in times:
+        for key, curve in curves_by_key.items():
+            idx = index_by_key[key]
+            while idx < len(curve) and _parse_dt(curve[idx]["time"]) <= _parse_dt(ts):
+                last_equity[key] = float(curve[idx]["equity"])
+                idx += 1
+            index_by_key[key] = idx
+        pnl = sum(
+            equity - float(starting_balance_by_key.get(key, 0.0))
+            for key, equity in last_equity.items()
+        )
+        combined.append({"time": ts, "pnl": round(pnl, 2)})
     return combined
 
 
@@ -322,6 +350,18 @@ def rulesets_page(request: Request):
             "config": cfg,
             "symbols": cfg.symbols,
             "timeframes": cfg.candle_timeframes,
+        },
+    )
+
+
+@router.get("/portfolio-backtest")
+def portfolio_backtest_page(request: Request):
+    cfg = load_config()
+    return TEMPLATES.TemplateResponse(
+        "portfolio_backtest.html",
+        {
+            "request": request,
+            "initial_balance": cfg.execution.account_start_balance or cfg.training.initial_balance,
         },
     )
 
@@ -516,6 +556,42 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
         total_pnl = round(sum(item["pnl"] for item in strategies), 2)
         all_trades.sort(key=lambda t: t.get("exit_ts") or t.get("entry_ts") or "")
         combined_curve = _combine_equity_curves(curves_by_key, starting_balance_by_key, initial_balance)
+        combined_pnl_curve = _combine_pnl_curves(curves_by_key, starting_balance_by_key)
+        curves_by_symbol: dict[str, dict[str, list[dict]]] = {}
+        starts_by_symbol: dict[str, dict[str, float]] = {}
+        strategy_curves = []
+        for key, curve in curves_by_key.items():
+            rs_id, symbol, timeframe = key.split(":", 2)
+            strategy = next(
+                (item for item in strategies if str(item["ruleset_id"]) == rs_id and item["symbol"] == symbol and item["timeframe"] == timeframe),
+                None,
+            )
+            curves_by_symbol.setdefault(symbol, {})[key] = curve
+            starts_by_symbol.setdefault(symbol, {})[key] = starting_balance_by_key[key]
+            start_balance = starting_balance_by_key[key]
+            strategy_curves.append({
+                "key": key,
+                "ruleset_id": int(rs_id),
+                "name": strategy["name"] if strategy else key,
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "initial_balance": start_balance,
+                "points": [
+                    {
+                        "time": point["time"],
+                        "equity": point["equity"],
+                        "pnl": round(float(point["equity"]) - start_balance, 2),
+                    }
+                    for point in curve
+                ],
+            })
+        symbol_curves = [
+            {
+                "symbol": symbol,
+                "points": _combine_pnl_curves(curves, starts_by_symbol.get(symbol, {})),
+            }
+            for symbol, curves in sorted(curves_by_symbol.items())
+        ]
         max_drawdown = _max_drawdown_from_curve(combined_curve)
         portfolio = {
             "window_start": common_start.isoformat(),
@@ -543,6 +619,17 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
         return JSONResponse({
             "portfolio": portfolio,
             "strategies": strategies,
+            "combined_curve": [
+                {
+                    "time": point["time"],
+                    "equity": point["equity"],
+                    "pnl": round(float(point["equity"]) - initial_balance, 2),
+                }
+                for point in combined_curve
+            ],
+            "combined_pnl_curve": combined_pnl_curve,
+            "symbol_curves": symbol_curves,
+            "strategy_curves": strategy_curves,
             "trades": all_trades[-200:],
         })
     finally:
