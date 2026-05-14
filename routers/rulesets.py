@@ -50,6 +50,24 @@ def _validation_passed(rs: RuleSet) -> bool:
     return metrics.get("validated") is True or metrics.get("validation_status") == "passed"
 
 
+def _structured_promotion_blocker(rs: RuleSet) -> str | None:
+    params = rs.parameters or {}
+    if params.get("execution_engine") != "research_genome":
+        return None
+    validation = params.get("validation") or {}
+    gates = validation.get("gates") or {}
+    rolling_gate = gates.get("rolling_holdout") or {}
+    if rolling_gate.get("passed") is not True or rolling_gate.get("status") != "passed":
+        return "Structured research rulesets require a passed rolling-holdout gate before promotion."
+    metrics = validation.get("metrics") or {}
+    rolling_metrics = metrics.get("rolling_holdout") or {}
+    if int(rolling_metrics.get("rolling_window_count") or 0) < 2:
+        return "Structured research rulesets require rolling-holdout metrics before promotion."
+    if float(rolling_metrics.get("rolling_window_pass_ratio") or 0.0) < 0.67:
+        return "Structured research ruleset rolling-holdout pass ratio is below the promotion minimum."
+    return None
+
+
 def _validation_criteria(payload: dict, rs: RuleSet, initial_balance: float) -> dict:
     cfg = load_config()
     params = rs.parameters or {}
@@ -344,6 +362,9 @@ def promote_ruleset(rs_id: int) -> JSONResponse:
                 {"error": "Ruleset must pass a validation backtest before promotion."},
                 status_code=400,
             )
+        blocker = _structured_promotion_blocker(rs)
+        if blocker:
+            return JSONResponse({"error": blocker}, status_code=400)
 
         now = datetime.now(timezone.utc)
         for other in session.query(RuleSet).filter(RuleSet.status == "active").all():
