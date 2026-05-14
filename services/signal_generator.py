@@ -17,6 +17,7 @@ from models.candle import Candle
 from models.signal import Signal as SignalModel
 from services.strategy_service import STRATEGIES, SignalType
 from services import ai_service, indicator_service, trade_manager, news_service, sentiment_service, rule_engine
+from services import market_context_service
 
 logger = logging.getLogger(__name__)
 
@@ -424,6 +425,14 @@ def _scan_rulesets():
                 c = _query_candles(sym, timeframe)
                 if c and len(c) >= 50:
                     all_candles[sym] = c
+            if all_candles:
+                market_context_service.enrich_candles_by_symbol(
+                    all_candles,
+                    include_news=cfg.news.enabled,
+                    include_strength=True,
+                    include_cot=True,
+                    include_sentiment=cfg.news.enabled,
+                )
 
             # Fetch higher-timeframe context (1h, 4h) per symbol so the model can
             # form directional bias from the broader picture before scoring the

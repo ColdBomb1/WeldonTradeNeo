@@ -152,6 +152,61 @@ def estimate_trade_risk_amount(trade: LiveTrade) -> float:
         return 0.0
 
 
+def _currency_legs(symbol: str, side: str) -> tuple[tuple[str, int], tuple[str, int]]:
+    cleaned = (symbol or "").upper().replace("/", "").replace("=X", "")
+    base, quote = cleaned[:3], cleaned[3:6]
+    if side == "buy":
+        return (base, 1), (quote, -1)
+    return (base, -1), (quote, 1)
+
+
+def check_currency_exposure(symbol: str, side: str, candidate_risk_pct: float = 0.0) -> tuple[bool, str]:
+    """Limit stacked directional exposure to the same currency."""
+    cfg = load_config()
+    ex = cfg.execution
+    risk_limit = float(getattr(ex, "max_currency_open_risk_pct", 0.0) or 0.0)
+    position_limit = int(getattr(ex, "max_same_currency_positions", 0) or 0)
+    if risk_limit <= 0 and position_limit <= 0:
+        return True, ""
+
+    session = get_session()
+    try:
+        state = _account_risk_state(session=session, cfg=cfg)
+        reference_balance = float(state.get("reference_balance") or 100000.0)
+        open_trades = session.query(LiveTrade).filter(LiveTrade.status == "open").all()
+
+        risk_by_currency: dict[str, float] = {}
+        positions_by_currency: dict[tuple[str, int], int] = {}
+        for trade in open_trades:
+            risk_pct = estimate_trade_risk_amount(trade) / reference_balance * 100.0 if reference_balance > 0 else 0.0
+            for currency, direction in _currency_legs(trade.symbol, trade.side):
+                if not currency:
+                    continue
+                risk_by_currency[currency] = risk_by_currency.get(currency, 0.0) + direction * risk_pct
+                positions_by_currency[(currency, direction)] = positions_by_currency.get((currency, direction), 0) + 1
+
+        for currency, direction in _currency_legs(symbol, side):
+            if not currency:
+                continue
+            projected_risk = risk_by_currency.get(currency, 0.0) + direction * max(0.0, float(candidate_risk_pct or 0.0))
+            projected_positions = positions_by_currency.get((currency, direction), 0) + 1
+            if risk_limit > 0 and abs(projected_risk) > risk_limit:
+                return False, (
+                    f"{currency} directional risk {abs(projected_risk):.2f}% exceeds "
+                    f"currency cap {risk_limit:.2f}%"
+                )
+            if position_limit > 0 and projected_positions > position_limit:
+                label = "long" if direction > 0 else "short"
+                return False, (
+                    f"{currency} {label} exposure would have {projected_positions} positions "
+                    f"(limit {position_limit})"
+                )
+
+        return True, ""
+    finally:
+        session.close()
+
+
 def _latest_snapshot_for_account(session, account_name: str):
     from models.account import AccountSnapshot
 
@@ -281,6 +336,8 @@ def get_effective_risk_per_trade_pct(cfg=None) -> float:
     if hard_stop <= 0 or dd < reduce_at:
         return base
     if dd >= hard_stop:
+        if bool(getattr(ex, "allow_drawdown_override", False)):
+            return minimum
         return 0.0
     span = max(hard_stop - reduce_at, 0.01)
     scale = max(0.0, min(1.0, (hard_stop - dd) / span))
@@ -317,12 +374,13 @@ def check_drawdown_circuit_breaker() -> tuple[bool, str]:
             float(ex.max_relative_drawdown_pct or ex.max_total_loss_pct or 0)
             - float(ex.drawdown_hard_stop_buffer_pct or 0),
         )
-        if hard_stop > 0 and state["relative_drawdown_pct"] >= hard_stop:
+        allow_override = bool(getattr(ex, "allow_drawdown_override", False))
+        if hard_stop > 0 and state["relative_drawdown_pct"] >= hard_stop and not allow_override:
             return False, (
                 f"Relative drawdown circuit breaker: {state['relative_drawdown_pct']:.2f}% "
                 f"(hard stop {hard_stop:.2f}%)"
             )
-        if hard_stop > 0 and state["trailing_drawdown_pct"] >= hard_stop:
+        if hard_stop > 0 and state["trailing_drawdown_pct"] >= hard_stop and not allow_override:
             return False, (
                 f"Trailing drawdown circuit breaker: {state['trailing_drawdown_pct']:.2f}% "
                 f"(hard stop {hard_stop:.2f}%)"
@@ -437,7 +495,10 @@ def get_risk_summary() -> dict:
             "max_total_loss_pct": cfg.execution.max_total_loss_pct,
             "max_relative_drawdown_pct": cfg.execution.max_relative_drawdown_pct,
             "drawdown_hard_stop_buffer_pct": cfg.execution.drawdown_hard_stop_buffer_pct,
+            "allow_drawdown_override": cfg.execution.allow_drawdown_override,
             "max_aggregate_open_risk_pct": cfg.execution.max_aggregate_open_risk_pct,
+            "max_currency_open_risk_pct": cfg.execution.max_currency_open_risk_pct,
+            "max_same_currency_positions": cfg.execution.max_same_currency_positions,
         },
         "circuit_breaker": {"ok": cb_ok, "reason": cb_reason},
         "correlation_warnings": correlation_warnings,

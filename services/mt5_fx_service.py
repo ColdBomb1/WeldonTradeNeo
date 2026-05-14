@@ -170,6 +170,57 @@ def _parse_points(rates) -> list[dict]:
     return points
 
 
+def _parse_ohlcv(rates) -> list[dict]:
+    candles = []
+    if rates is None:
+        return candles
+
+    for row in rates:
+        tick_volume = float(row["tick_volume"]) if "tick_volume" in row.dtype.names else None
+        real_volume = float(row["real_volume"]) if "real_volume" in row.dtype.names else None
+        volume = real_volume if real_volume and real_volume > 0 else tick_volume
+        dt = datetime.fromtimestamp(int(row["time"]), tz=timezone.utc).isoformat()
+        candles.append({
+            "time": dt,
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": volume,
+        })
+    return candles
+
+
+def fetch_ohlcv(symbol: str, range_name: str, interval: str, cfg: MT5Config) -> list[dict]:
+    """Fetch OHLCV candles from the configured MT5 terminal."""
+    if mt5 is None:
+        raise ValueError("MetaTrader5 package is not installed in this Python environment.")
+
+    selected_range = range_name if range_name in SUPPORTED_RANGES else "1d"
+    selected_interval = interval if interval in SUPPORTED_INTERVALS else "1m"
+    timeframe = _timeframe(selected_interval)
+    if timeframe is None:
+        raise ValueError(f"MT5 does not support interval '{selected_interval}'.")
+
+    if not initialize(cfg):
+        raise ValueError("Failed to initialize MT5. Check terminal path/account settings.")
+
+    try:
+        resolved_symbol = _resolve_symbol(symbol, cfg)
+        rates = mt5.copy_rates_from_pos(
+            resolved_symbol,
+            timeframe,
+            0,
+            _bar_count(selected_range, selected_interval),
+        )
+        candles = _parse_ohlcv(rates)
+        if not candles:
+            raise ValueError(f"No MT5 OHLCV data returned for symbol '{resolved_symbol}'.")
+        return candles
+    finally:
+        shutdown()
+
+
 def get_chart_data(symbol: str, range_name: str, interval: str, cfg: MT5Config) -> dict:
     if mt5 is None:
         raise ValueError("MetaTrader5 package is not installed in this Python environment.")

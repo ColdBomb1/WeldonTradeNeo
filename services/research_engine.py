@@ -16,7 +16,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from config import load_config
-from services import ai_service
+from services import ai_service, cot_service, news_service
+from services import market_context_service
 from services.backtest_engine import BacktestConfig, BacktestResults, run_backtest
 from services.strategy_service import get_strategy
 
@@ -78,6 +79,11 @@ DEFAULT_SETTINGS = {
     "max_month_loss_pct": 3.0,
     "min_monthly_tests_for_gate": 3,
     "min_session_hours": 4,
+    "context_enabled": True,
+    "news_filter_enabled": True,
+    "currency_strength_enabled": True,
+    "cot_enabled": True,
+    "sentiment_enabled": False,
     "persist_group_winners": True,
     "mutation_rate": 0.35,
     "seed": None,
@@ -107,6 +113,12 @@ PARAM_SPACE = {
     "breakout_lookback": (12, 48, 2),
     "sl_atr_multiplier": (1.2, 3.2, 0.1),
     "tp_rr": (1.2, 2.6, 0.1),
+    "news_block_before_min": (15, 90, 5),
+    "news_block_after_min": (5, 90, 5),
+    "currency_strength_min": (0.02, 0.40, 0.02),
+    "cot_min_abs": (1.0, 35.0, 1.0),
+    "sentiment_min_abs": (0.05, 0.60, 0.05),
+    "min_session_quality": (0.25, 0.85, 0.05),
     "session_start_hour": (0, 23, 1),
     "session_end_hour": (1, 24, 1),
 }
@@ -121,6 +133,10 @@ WEIGHT_SPACE = {
     "breakout": (0.0, 1.0, 0.1),
     "candle": (0.0, 0.8, 0.05),
     "volatility": (0.0, 1.0, 0.1),
+    "session_quality": (0.0, 0.8, 0.05),
+    "currency_strength": (0.0, 1.0, 0.1),
+    "cot_positioning": (0.0, 0.8, 0.05),
+    "sentiment": (0.0, 0.8, 0.05),
 }
 
 
@@ -202,6 +218,11 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["max_month_loss_pct"] = max(0.1, min(50.0, float(settings["max_month_loss_pct"])))
     settings["min_monthly_tests_for_gate"] = max(1, min(1000, int(settings["min_monthly_tests_for_gate"])))
     settings["min_session_hours"] = max(1, min(23, int(settings["min_session_hours"])))
+    settings["context_enabled"] = _coerce_bool(settings["context_enabled"])
+    settings["news_filter_enabled"] = _coerce_bool(settings["news_filter_enabled"])
+    settings["currency_strength_enabled"] = _coerce_bool(settings["currency_strength_enabled"])
+    settings["cot_enabled"] = _coerce_bool(settings["cot_enabled"])
+    settings["sentiment_enabled"] = _coerce_bool(settings["sentiment_enabled"])
     settings["persist_group_winners"] = _coerce_bool(settings["persist_group_winners"])
     settings["mutation_rate"] = max(0.01, min(1.0, float(settings["mutation_rate"])))
     settings["ai_review"] = _coerce_bool(settings["ai_review"])
@@ -245,6 +266,18 @@ def run_research(
     settings: dict,
 ) -> dict:
     settings = normalize_settings(settings)
+    if settings["news_filter_enabled"]:
+        _ensure_research_calendar(candles_by_symbol)
+    if settings["cot_enabled"]:
+        _ensure_research_cot(candles_by_symbol)
+    if settings["context_enabled"]:
+        candles_by_symbol = market_context_service.enrich_candles_by_symbol(
+            candles_by_symbol,
+            include_news=settings["news_filter_enabled"],
+            include_strength=settings["currency_strength_enabled"],
+            include_cot=settings["cot_enabled"],
+            include_sentiment=False,
+        )
     _active_research[run_id] = False
 
     windows = {
@@ -417,6 +450,40 @@ def run_research(
     })
     _active_research.pop(run_id, None)
     return result
+
+
+def _ensure_research_calendar(candles_by_symbol: dict[str, list[dict]]) -> None:
+    times = [
+        _parse_dt(candle["time"])
+        for candles in candles_by_symbol.values()
+        for candle in candles
+        if candle.get("time")
+    ]
+    if not times:
+        return
+    start, end = min(times), max(times)
+    try:
+        if news_service.count_events_in_range(start, end) == 0:
+            news_service.seed_historical_calendar(start, end)
+    except Exception as exc:
+        logger.warning("Could not seed research calendar context: %s", exc)
+
+
+def _ensure_research_cot(candles_by_symbol: dict[str, list[dict]]) -> None:
+    times = [
+        _parse_dt(candle["time"])
+        for candles in candles_by_symbol.values()
+        for candle in candles
+        if candle.get("time")
+    ]
+    if not times:
+        return
+    start, end = min(times), max(times)
+    try:
+        if cot_service.count_positions_in_range(start - timedelta(days=90), end) == 0:
+            cot_service.sync_legacy_currency_futures(start, end)
+    except Exception as exc:
+        logger.warning("Could not sync COT context: %s", exc)
 
 
 def _evaluate_candidate(
@@ -981,6 +1048,14 @@ def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float, settin
         child["short_enabled"] = not bool(child.get("short_enabled", True))
     if rng.random() < mutation_rate * 0.5:
         child["session_enabled"] = not bool(child.get("session_enabled", False))
+    if rng.random() < mutation_rate * 0.35:
+        child["news_filter_enabled"] = not bool(child.get("news_filter_enabled", True))
+    if rng.random() < mutation_rate * 0.5:
+        child["currency_strength_enabled"] = not bool(child.get("currency_strength_enabled", True))
+    if rng.random() < mutation_rate * 0.35:
+        child["cot_enabled"] = not bool(child.get("cot_enabled", False))
+    if rng.random() < mutation_rate * 0.25:
+        child["sentiment_enabled"] = not bool(child.get("sentiment_enabled", False))
     if not child.get("long_enabled") and not child.get("short_enabled"):
         child["long_enabled"] = True
         child["short_enabled"] = True
@@ -1015,6 +1090,10 @@ def _neighbor_genome(parent: dict, rng: random.Random, settings: dict) -> dict:
     child["long_enabled"] = bool(parent.get("long_enabled", True))
     child["short_enabled"] = bool(parent.get("short_enabled", True))
     child["session_enabled"] = bool(parent.get("session_enabled", False))
+    child["news_filter_enabled"] = bool(parent.get("news_filter_enabled", True))
+    child["currency_strength_enabled"] = bool(parent.get("currency_strength_enabled", True))
+    child["cot_enabled"] = bool(parent.get("cot_enabled", False))
+    child["sentiment_enabled"] = bool(parent.get("sentiment_enabled", False))
     _repair_genome(child, settings)
     return child
 
@@ -1059,6 +1138,10 @@ def genome_to_rules_text(genome: dict) -> str:
         f"{genome.get('bb_std')}/{genome.get('bb_near_pct')}\n"
         f"ATR ratio filter: {genome.get('atr_min_ratio')}-{genome.get('atr_max_ratio')}\n"
         f"SL: {genome.get('sl_atr_multiplier')}x ATR; TP: {genome.get('tp_rr')}R\n\n"
+        f"Context filters: news_filter={bool(genome.get('news_filter_enabled', True))}, "
+        f"currency_strength={bool(genome.get('currency_strength_enabled', False))}, "
+        f"cot={bool(genome.get('cot_enabled', False))}, "
+        f"sentiment={bool(genome.get('sentiment_enabled', False))}\n"
         f"Entry session filter: enabled={bool(genome.get('session_enabled', False))}, "
         f"UTC {genome.get('session_start_hour', 7)}-{genome.get('session_end_hour', 20)}\n\n"
         "Weights:\n"
@@ -1295,6 +1378,16 @@ def _repair_genome(genome: dict, settings: dict | None = None) -> None:
         genome["rsi_sell_min"], genome["rsi_sell_max"] = 32.0, 58.0
     genome["session_start_hour"] = max(0, min(23, int(genome.get("session_start_hour", 7))))
     genome["session_end_hour"] = max(1, min(24, int(genome.get("session_end_hour", 20))))
+    genome["news_filter_enabled"] = bool(genome.get("news_filter_enabled", True))
+    genome["news_block_before_min"] = max(0, min(180, int(genome.get("news_block_before_min", 30))))
+    genome["news_block_after_min"] = max(0, min(180, int(genome.get("news_block_after_min", 30))))
+    genome["currency_strength_enabled"] = bool(genome.get("currency_strength_enabled", False))
+    genome["currency_strength_min"] = max(0.0, min(2.0, float(genome.get("currency_strength_min", 0.08))))
+    genome["cot_enabled"] = bool(genome.get("cot_enabled", False))
+    genome["cot_min_abs"] = max(0.0, min(100.0, float(genome.get("cot_min_abs", 5.0))))
+    genome["sentiment_enabled"] = bool(genome.get("sentiment_enabled", False))
+    genome["sentiment_min_abs"] = max(0.0, min(1.0, float(genome.get("sentiment_min_abs", 0.2))))
+    genome["min_session_quality"] = max(0.0, min(1.0, float(genome.get("min_session_quality", 0.5))))
     if genome.get("session_enabled"):
         min_session_hours = int((settings or DEFAULT_SETTINGS).get("min_session_hours", 1))
         _enforce_min_session_hours(genome, min_session_hours)

@@ -10,3 +10,4 @@ anthropic==0.52.0
 websocket-client==1.8.0
 beautifulsoup4==4.12.3
 tzdata==2026.1
+MetaTrader5==5.0.5735

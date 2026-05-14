@@ -209,8 +209,17 @@ async def update_settings(request: Request):
         cfg.execution.risk_reduction_drawdown_pct = max(0.0, min(20.0, float(form.get("execution_risk_reduction_drawdown", cfg.execution.risk_reduction_drawdown_pct))))
     except (ValueError, TypeError):
         pass
+    cfg.execution.allow_drawdown_override = bool(form.get("execution_allow_drawdown_override"))
     try:
         cfg.execution.max_aggregate_open_risk_pct = max(0.0, min(10.0, float(form.get("execution_max_aggregate_risk", cfg.execution.max_aggregate_open_risk_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.max_currency_open_risk_pct = max(0.0, min(10.0, float(form.get("execution_max_currency_risk", cfg.execution.max_currency_open_risk_pct))))
+    except (ValueError, TypeError):
+        pass
+    try:
+        cfg.execution.max_same_currency_positions = max(0, min(10, int(form.get("execution_max_same_currency_positions", cfg.execution.max_same_currency_positions))))
     except (ValueError, TypeError):
         pass
     try:

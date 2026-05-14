@@ -13,7 +13,7 @@ from db import get_session
 from models.candle import Candle
 from models.ruleset import RuleSet
 from models.training import TrainingRun
-from services import ai_service, rule_engine
+from services import ai_service, market_context_service, rule_engine
 from services.backtest_engine import BacktestConfig, run_backtest
 from services.strategy_service import list_strategies
 
@@ -396,34 +396,56 @@ async def backtest_active_portfolio(request: Request) -> JSONResponse:
         all_trades = []
         curves_by_key = {}
         starting_balance_by_key = {}
+        candles_by_scope_key = {}
+        candles_by_symbol_timeframe = {}
+        for item in scopes:
+            symbol = item["symbol"]
+            timeframe = item["timeframe"]
+            symbol_tf_key = (symbol, timeframe)
+            if symbol_tf_key not in candles_by_symbol_timeframe:
+                rows = (
+                    session.query(Candle)
+                    .filter(
+                        Candle.symbol == symbol,
+                        Candle.timeframe == timeframe,
+                        Candle.ts >= common_start,
+                        Candle.ts <= common_end,
+                    )
+                    .order_by(Candle.ts.asc())
+                    .all()
+                )
+                candles_by_symbol_timeframe[symbol_tf_key] = [
+                    {
+                        "time": c.ts.isoformat(),
+                        "open": c.open,
+                        "high": c.high,
+                        "low": c.low,
+                        "close": c.close,
+                        "volume": c.volume or 0,
+                    }
+                    for c in rows
+                ]
+            candles_by_scope_key[(item["ruleset"].id, symbol, timeframe)] = candles_by_symbol_timeframe[symbol_tf_key]
+
+        candles_by_timeframe = {}
+        for (symbol, timeframe), candles in candles_by_symbol_timeframe.items():
+            candles_by_timeframe.setdefault(timeframe, {})[symbol] = candles
+        for candles_by_symbol in candles_by_timeframe.values():
+            market_context_service.enrich_candles_by_symbol(
+                candles_by_symbol,
+                include_news=True,
+                include_strength=True,
+                include_cot=True,
+                include_sentiment=False,
+            )
+
         for item in scopes:
             rs = item["ruleset"]
             schema = item["schema"]
             criteria = item["criteria"]
             symbol = item["symbol"]
             timeframe = item["timeframe"]
-            rows = (
-                session.query(Candle)
-                .filter(
-                    Candle.symbol == symbol,
-                    Candle.timeframe == timeframe,
-                    Candle.ts >= common_start,
-                    Candle.ts <= common_end,
-                )
-                .order_by(Candle.ts.asc())
-                .all()
-            )
-            candles = [
-                {
-                    "time": c.ts.isoformat(),
-                    "open": c.open,
-                    "high": c.high,
-                    "low": c.low,
-                    "close": c.close,
-                    "volume": c.volume or 0,
-                }
-                for c in rows
-            ]
+            candles = candles_by_scope_key[(rs.id, symbol, timeframe)]
             starting_balance = float(
                 criteria.get("initial_balance")
                 if use_validation_balance and criteria.get("initial_balance")
@@ -804,6 +826,14 @@ async def backtest_ruleset(rs_id: int, request: Request) -> JSONResponse:
                  "low": c.low, "close": c.close, "volume": c.volume or 0}
                 for c in rows
             ]
+        if all_pair_candles:
+            market_context_service.enrich_candles_by_symbol(
+                all_pair_candles,
+                include_news=True,
+                include_strength=True,
+                include_cot=True,
+                include_sentiment=False,
+            )
     finally:
         session.close()
 

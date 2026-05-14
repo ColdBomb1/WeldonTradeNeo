@@ -59,6 +59,11 @@
       <label>Min Session Hours <input type="number" id="min-session-hours" min="1" max="23" value="{{ defaults.min_session_hours }}" /></label>
       <label>Cost Stress x <input type="number" id="cost-stress" min="1" max="5" step="0.1" value="{{ defaults.cost_stress_multiplier }}" /></label>
       <label>AI Review <input type="checkbox" id="ai-review-enabled" {% if defaults.ai_review %}checked{% endif %} /></label>
+      <label>Context <input type="checkbox" id="context-enabled" {% if defaults.context_enabled %}checked{% endif %} /></label>
+      <label>News Filter <input type="checkbox" id="news-filter-enabled" {% if defaults.news_filter_enabled %}checked{% endif %} /></label>
+      <label>Currency Strength <input type="checkbox" id="currency-strength-enabled" {% if defaults.currency_strength_enabled %}checked{% endif %} /></label>
+      <label>COT <input type="checkbox" id="cot-enabled" {% if defaults.cot_enabled %}checked{% endif %} /></label>
+      <label>Sentiment <input type="checkbox" id="sentiment-enabled" {% if defaults.sentiment_enabled %}checked{% endif %} /></label>
       <div class="button-wrap" style="align-self:flex-end">
         <button type="button" id="start-btn">Start Research</button>
       </div>
@@ -314,6 +319,11 @@
         cost_stress_multiplier: parseFloat(document.getElementById('cost-stress').value) || 1.5,
         risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,
         ai_review: document.getElementById('ai-review-enabled').checked,
+        context_enabled: document.getElementById('context-enabled').checked,
+        news_filter_enabled: document.getElementById('news-filter-enabled').checked,
+        currency_strength_enabled: document.getElementById('currency-strength-enabled').checked,
+        cot_enabled: document.getElementById('cot-enabled').checked,
+        sentiment_enabled: document.getElementById('sentiment-enabled').checked,
       },
     };
     const resp = await fetch('/api/research/start', {

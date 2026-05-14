@@ -229,14 +229,18 @@ def check_risk_limits(symbol: str, side: str) -> tuple[bool, str]:
         if not cb_ok:
             return False, cb_reason
 
+        effective_risk_pct = risk_manager.get_effective_risk_per_trade_pct(cfg)
         agg_ok, agg_reason = risk_manager.check_aggregate_open_risk(
-            candidate_risk_pct=risk_manager.get_effective_risk_per_trade_pct(cfg)
+            candidate_risk_pct=effective_risk_pct
         )
         if not agg_ok:
             return False, agg_reason
-        effective_risk_pct = risk_manager.get_effective_risk_per_trade_pct(cfg)
         if effective_risk_pct <= 0:
             return False, "Effective risk per trade is 0% due to drawdown limits"
+
+        ccy_ok, ccy_reason = risk_manager.check_currency_exposure(symbol, side, effective_risk_pct)
+        if not ccy_ok:
+            return False, ccy_reason
 
         # Correlation check
         corr_ok, corr_reason = risk_manager.check_correlation(symbol, side)

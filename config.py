@@ -114,7 +114,10 @@ class ExecutionConfig(BaseModel):
     max_relative_drawdown_pct: float = 7.0
     drawdown_hard_stop_buffer_pct: float = 0.25
     risk_reduction_drawdown_pct: float = 4.0
+    allow_drawdown_override: bool = False
     max_aggregate_open_risk_pct: float = 2.0
+    max_currency_open_risk_pct: float = 3.0
+    max_same_currency_positions: int = 3
 
     # Position sizing (used by trade manager when rules don't specify SL/TP)
     default_lot_type: str = "mini"

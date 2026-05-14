@@ -6,6 +6,7 @@ from .account import AccountSnapshot, AccountDeal
 from .trade_plan import TradePlan, BacktestRun
 from .signal import Signal, LiveTrade
 from .news import NewsEvent, SentimentScore
+from .cot import CotPosition
 from .training import TrainingRun, TrainingIteration
 from .ruleset import RuleSet
 from .research import ResearchRun, ResearchCandidate
@@ -26,6 +27,7 @@ __all__ = [
     "LiveTrade",
     "NewsEvent",
     "SentimentScore",
+    "CotPosition",
     "TrainingRun",
     "TrainingIteration",
     "RuleSet",

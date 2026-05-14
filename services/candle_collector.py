@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 
 from config import load_config
-from services import yahoo_fx_service
+from services import mt5_fx_service, yahoo_fx_service
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,35 @@ def _snap_ts_to_bar_start(ts: datetime, timeframe: str) -> datetime:
     return ts.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
-    """Fetch OHLCV data from Yahoo and upsert into the candles table.
+def _fetch_ohlcv(symbol: str, timeframe: str, timeout_sec: float, source: str) -> tuple[list[dict], str]:
+    mapping = _TIMEFRAME_MAP.get(timeframe)
+    if not mapping:
+        return [], source
+
+    interval, range_name = mapping
+    cfg = load_config()
+    selected_source = source if source in {"mt5", "yahoo"} else "yahoo"
+
+    if selected_source == "mt5":
+        try:
+            return mt5_fx_service.fetch_ohlcv(symbol, range_name, timeframe, cfg.mt5), "mt5"
+        except Exception as exc:
+            logger.warning("MT5 OHLCV fetch failed for %s/%s: %s", symbol, timeframe, exc)
+            if cfg.default_source == "mt5":
+                logger.info("Falling back to Yahoo for %s/%s after MT5 fetch failure", symbol, timeframe)
+
+    try:
+        ohlcv = yahoo_fx_service.fetch_ohlcv(symbol, range_name, interval, timeout_sec)
+        if timeframe == "4h":
+            ohlcv = _aggregate_4h_candles(ohlcv)
+        return ohlcv, "yahoo"
+    except Exception as exc:
+        logger.warning("Yahoo OHLCV fetch failed for %s/%s: %s", symbol, timeframe, exc)
+        return [], "yahoo"
+
+
+def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float, source: str) -> int:
+    """Fetch OHLCV data and upsert into the candles table.
 
     Returns the number of candles upserted.
     """
@@ -96,23 +123,9 @@ def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
     from db import get_session
     from models.candle import Candle
 
-    mapping = _TIMEFRAME_MAP.get(timeframe)
-    if not mapping:
-        return 0
-
-    yahoo_interval, yahoo_range = mapping
-
-    try:
-        ohlcv = yahoo_fx_service.fetch_ohlcv(symbol, yahoo_range, yahoo_interval, timeout_sec)
-    except Exception as exc:
-        logger.warning("Yahoo OHLCV fetch failed for %s/%s: %s", symbol, timeframe, exc)
-        return 0
-
+    ohlcv, actual_source = _fetch_ohlcv(symbol, timeframe, timeout_sec, source)
     if not ohlcv:
         return 0
-
-    if timeframe == "4h":
-        ohlcv = _aggregate_4h_candles(ohlcv)
 
     session = get_session()
     try:
@@ -136,7 +149,7 @@ def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
                 low=candle["low"],
                 close=candle["close"],
                 volume=candle.get("volume"),
-                source="yahoo",
+                source=actual_source,
             ).on_conflict_do_update(
                 constraint="uq_candle_symbol_tf_ts",
                 set_={
@@ -145,7 +158,7 @@ def _collect_and_store(symbol: str, timeframe: str, timeout_sec: float) -> int:
                     "low": candle["low"],
                     "close": candle["close"],
                     "volume": candle.get("volume"),
-                    "source": "yahoo",
+                    "source": actual_source,
                 },
             )
             session.execute(stmt)
@@ -172,7 +185,7 @@ async def candle_collection_loop(stop_event: asyncio.Event) -> None:
                         break
                     try:
                         count = await asyncio.to_thread(
-                            _collect_and_store, symbol, timeframe, cfg.request_timeout_sec
+                            _collect_and_store, symbol, timeframe, cfg.request_timeout_sec, cfg.default_source
                         )
                         if count:
                             logger.info("Stored %d candles: %s/%s", count, symbol, timeframe)

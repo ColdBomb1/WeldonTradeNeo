@@ -782,6 +782,10 @@ class ResearchGenomeStrategy(BaseStrategy):
             {"name": "rsi_sell_max", "type": "float", "label": "RSI sell max", "default": 58.0},
             {"name": "sl_atr_multiplier", "type": "float", "label": "SL ATR", "default": 2.0},
             {"name": "tp_rr", "type": "float", "label": "TP risk/reward", "default": 1.7},
+            {"name": "news_filter_enabled", "type": "bool", "label": "News filter", "default": True},
+            {"name": "currency_strength_enabled", "type": "bool", "label": "Currency strength scoring", "default": False},
+            {"name": "cot_enabled", "type": "bool", "label": "COT positioning scoring", "default": False},
+            {"name": "sentiment_enabled", "type": "bool", "label": "Sentiment scoring", "default": False},
             {"name": "session_enabled", "type": "bool", "label": "Entry session filter", "default": False},
             {"name": "session_start_hour", "type": "int", "label": "Session start UTC", "default": 7},
             {"name": "session_end_hour", "type": "int", "label": "Session end UTC", "default": 20},
@@ -814,6 +818,16 @@ class ResearchGenomeStrategy(BaseStrategy):
             "breakout_lookback": 20,
             "sl_atr_multiplier": 2.0,
             "tp_rr": 1.7,
+            "news_filter_enabled": True,
+            "news_block_before_min": 30,
+            "news_block_after_min": 30,
+            "currency_strength_enabled": False,
+            "currency_strength_min": 0.08,
+            "cot_enabled": False,
+            "cot_min_abs": 5.0,
+            "sentiment_enabled": False,
+            "sentiment_min_abs": 0.2,
+            "min_session_quality": 0.5,
             "session_enabled": False,
             "session_start_hour": 7,
             "session_end_hour": 20,
@@ -827,6 +841,10 @@ class ResearchGenomeStrategy(BaseStrategy):
                 "breakout": 0.5,
                 "candle": 0.35,
                 "volatility": 0.45,
+                "session_quality": 0.0,
+                "currency_strength": 0.0,
+                "cot_positioning": 0.0,
+                "sentiment": 0.0,
             },
         }
 
@@ -868,6 +886,9 @@ class ResearchGenomeStrategy(BaseStrategy):
         p = self._merged(params)
         price = pre["closes"][i]
         ts = datetime.fromisoformat(candles[i]["time"])
+        ctx = candles[i].get("context") or {}
+        if p.get("news_filter_enabled", True) and self._blocked_by_news(ctx, p):
+            return Signal(SignalType.HOLD, price, ts, "Blocked by high-impact event window", confidence=0.0)
         if p.get("session_enabled", False) and not self._within_session(ts, p):
             return Signal(SignalType.HOLD, price, ts, "Outside entry session", confidence=0.0)
         if i < max(int(p["trend_ema"]), int(p["bb_period"]), int(p["macd_slow"]) + int(p["macd_signal"]), 30):
@@ -934,6 +955,7 @@ class ResearchGenomeStrategy(BaseStrategy):
         hist, prev_hist = pre["macd_hist"][i], pre["macd_hist"][i - 1]
         lower, upper = pre["bb_lower"][i], pre["bb_upper"][i]
         atr, atr_avg = pre["atr"][i], pre["atr_avg"][i]
+        ctx = candles[i].get("context") or {}
         lookback = int(p["breakout_lookback"])
         start = max(0, i - lookback)
         prior_high = max(pre["highs"][start:i]) if i > start else candles[i]["high"]
@@ -964,6 +986,19 @@ class ResearchGenomeStrategy(BaseStrategy):
             add("volatility", float(p["atr_min_ratio"]) <= ratio <= float(p["atr_max_ratio"]), "volatility")
         if pfast is not None and pmedium is not None:
             add("ema_stack", pfast <= pmedium and fast > medium if is_buy else pfast >= pmedium and fast < medium, "ema cross")
+        add("session_quality", float(ctx.get("session_quality") or 0.0) >= float(p.get("min_session_quality", 0.5)), "session quality")
+        if p.get("currency_strength_enabled", False):
+            bias = float(ctx.get("currency_strength_bias") or 0.0)
+            minimum = float(p.get("currency_strength_min", 0.08))
+            add("currency_strength", bias >= minimum if is_buy else bias <= -minimum, "currency strength")
+        if p.get("cot_enabled", False):
+            bias = float(ctx.get("cot_bias") or 0.0)
+            minimum = float(p.get("cot_min_abs", 5.0))
+            add("cot_positioning", bias >= minimum if is_buy else bias <= -minimum, "cot positioning")
+        if p.get("sentiment_enabled", False):
+            sentiment = float(ctx.get("sentiment_score") or 0.0)
+            minimum = float(p.get("sentiment_min_abs", 0.2))
+            add("sentiment", sentiment >= minimum if is_buy else sentiment <= -minimum, "sentiment")
 
         return score, parts
 
@@ -988,6 +1023,18 @@ class ResearchGenomeStrategy(BaseStrategy):
         if start < end:
             return start <= hour < end
         return hour >= start or hour < end
+
+    @staticmethod
+    def _blocked_by_news(ctx: dict, p: dict) -> bool:
+        before = int(p.get("news_block_before_min", 30))
+        after = int(p.get("news_block_after_min", 30))
+        minutes_to = ctx.get("minutes_to_high_impact")
+        minutes_since = ctx.get("minutes_since_high_impact")
+        if minutes_to is not None and 0 <= int(minutes_to) <= before:
+            return True
+        if minutes_since is not None and 0 <= int(minutes_since) <= after:
+            return True
+        return False
 
     @staticmethod
     def _rolling_avg(values: List[Optional[float]], period: int) -> List[Optional[float]]:
