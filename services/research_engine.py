@@ -9,6 +9,7 @@ risk policy.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import random
 from datetime import datetime, timedelta, timezone
@@ -188,6 +189,10 @@ def default_genome() -> dict:
     return copy.deepcopy(strategy.default_params())
 
 
+def _genome_key(genome: dict) -> str:
+    return json.dumps(genome, sort_keys=True, separators=(",", ":"))
+
+
 def run_research(
     *,
     run_id: int,
@@ -307,7 +312,7 @@ def run_research(
         for item in ([best_seen] if best_seen else []) + last_scored:
             if not item:
                 continue
-            key = repr(sorted((item.get("genome") or {}).items()))
+            key = _genome_key(item.get("genome") or {})
             if key in seen_genomes:
                 continue
             seen_genomes.add(key)
