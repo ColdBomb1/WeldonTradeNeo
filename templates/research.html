@@ -52,6 +52,7 @@
       <label>Min Validation Trades <input type="number" id="min-trades" min="1" max="500" value="{{ defaults.min_validation_trades }}" /></label>
       <label>Holdout Days <input type="number" id="holdout-days" min="0" max="120" value="{{ defaults.holdout_days }}" /></label>
       <label>Min Holdout Trades <input type="number" id="min-holdout-trades" min="1" max="500" value="{{ defaults.min_holdout_trades }}" /></label>
+      <label>Min Session Hours <input type="number" id="min-session-hours" min="1" max="23" value="{{ defaults.min_session_hours }}" /></label>
       <label>Cost Stress x <input type="number" id="cost-stress" min="1" max="5" step="0.1" value="{{ defaults.cost_stress_multiplier }}" /></label>
       <label>AI Review <input type="checkbox" id="ai-review-enabled" {% if defaults.ai_review %}checked{% endif %} /></label>
       <div class="button-wrap" style="align-self:flex-end">
@@ -274,6 +275,7 @@
         holdout_enabled: true,
         holdout_days: parseInt(document.getElementById('holdout-days').value) || 14,
         min_holdout_trades: parseInt(document.getElementById('min-holdout-trades').value) || 20,
+        min_session_hours: parseInt(document.getElementById('min-session-hours').value) || 4,
         cost_stress_multiplier: parseFloat(document.getElementById('cost-stress').value) || 1.5,
         risk_per_trade_pct: parseFloat(document.getElementById('risk').value) || 0.35,
         ai_review: document.getElementById('ai-review-enabled').checked,

@@ -60,6 +60,7 @@ DEFAULT_SETTINGS = {
     "min_positive_month_ratio": 0.45,
     "max_month_loss_pct": 3.0,
     "min_monthly_tests_for_gate": 3,
+    "min_session_hours": 4,
     "persist_group_winners": True,
     "mutation_rate": 0.35,
     "seed": None,
@@ -154,6 +155,7 @@ def normalize_settings(raw: dict | None) -> dict:
     settings["min_positive_month_ratio"] = max(0.0, min(1.0, float(settings["min_positive_month_ratio"])))
     settings["max_month_loss_pct"] = max(0.1, min(50.0, float(settings["max_month_loss_pct"])))
     settings["min_monthly_tests_for_gate"] = max(1, min(1000, int(settings["min_monthly_tests_for_gate"])))
+    settings["min_session_hours"] = max(1, min(23, int(settings["min_session_hours"])))
     settings["persist_group_winners"] = _coerce_bool(settings["persist_group_winners"])
     settings["mutation_rate"] = max(0.01, min(1.0, float(settings["mutation_rate"])))
     settings["ai_review"] = _coerce_bool(settings["ai_review"])
@@ -230,7 +232,7 @@ def run_research(
         group_candles = {symbol: candles_by_symbol[symbol] for symbol in group_symbols}
         group_windows = {symbol: windows[symbol] for symbol in group_symbols}
         group_rng = random.Random(f"{settings.get('seed') or run_id}:{group['name']}")
-        population = _initial_population(group_rng, settings["population_size"])
+        population = _initial_population(group_rng, settings["population_size"], settings)
         best_seen: dict | None = None
         last_scored: list[dict] = []
 
@@ -284,7 +286,7 @@ def run_research(
             next_population = [copy.deepcopy(item["genome"]) for item in elites]
             while len(next_population) < settings["population_size"]:
                 parent = group_rng.choice(elites)["genome"]
-                next_population.append(mutate_genome(parent, group_rng, settings["mutation_rate"]))
+                next_population.append(mutate_genome(parent, group_rng, settings["mutation_rate"], settings))
             population = next_population
 
         top_train = []
@@ -690,7 +692,7 @@ def _candidate_selection_score(
     return round(weighted_score / weight, 4)
 
 
-def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float) -> dict:
+def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float, settings: dict | None = None) -> dict:
     child = copy.deepcopy(parent)
     for key, spec in PARAM_SPACE.items():
         if rng.random() < mutation_rate:
@@ -709,7 +711,7 @@ def mutate_genome(parent: dict, rng: random.Random, mutation_rate: float) -> dic
     if not child.get("long_enabled") and not child.get("short_enabled"):
         child["long_enabled"] = True
         child["short_enabled"] = True
-    _repair_genome(child)
+    _repair_genome(child, settings)
     return child
 
 
@@ -737,11 +739,11 @@ def genome_to_rules_text(genome: dict) -> str:
     )
 
 
-def _initial_population(rng: random.Random, size: int) -> list[dict]:
+def _initial_population(rng: random.Random, size: int, settings: dict | None = None) -> list[dict]:
     base = default_genome()
     population = [base]
     while len(population) < size:
-        population.append(mutate_genome(base, rng, mutation_rate=0.9))
+        population.append(mutate_genome(base, rng, mutation_rate=0.9, settings=settings))
     return population
 
 
@@ -913,7 +915,7 @@ def _mutate_value(current: Any, spec: tuple[float, float, float], rng: random.Ra
     return int(round(value)) if float(step).is_integer() and float(low).is_integer() else round(value, 4)
 
 
-def _repair_genome(genome: dict) -> None:
+def _repair_genome(genome: dict, settings: dict | None = None) -> None:
     if int(genome.get("fast_ema", 20)) >= int(genome.get("medium_ema", 50)):
         genome["fast_ema"] = max(5, int(genome["medium_ema"]) // 2)
     if int(genome.get("medium_ema", 50)) >= int(genome.get("trend_ema", 100)):
@@ -924,6 +926,32 @@ def _repair_genome(genome: dict) -> None:
         genome["rsi_sell_min"], genome["rsi_sell_max"] = 32.0, 58.0
     genome["session_start_hour"] = max(0, min(23, int(genome.get("session_start_hour", 7))))
     genome["session_end_hour"] = max(1, min(24, int(genome.get("session_end_hour", 20))))
+    if genome.get("session_enabled"):
+        min_session_hours = int((settings or DEFAULT_SETTINGS).get("min_session_hours", 1))
+        _enforce_min_session_hours(genome, min_session_hours)
+
+
+def _session_duration_hours(start_hour: int, end_hour: int) -> int:
+    if start_hour == 0 and end_hour == 24:
+        return 24
+    if end_hour == start_hour:
+        return 0
+    if end_hour > start_hour:
+        return end_hour - start_hour
+    return (24 - start_hour) + end_hour
+
+
+def _enforce_min_session_hours(genome: dict, min_session_hours: int) -> None:
+    min_session_hours = max(1, min(23, int(min_session_hours)))
+    start = max(0, min(23, int(genome.get("session_start_hour", 7))))
+    end = max(1, min(24, int(genome.get("session_end_hour", 20))))
+    if _session_duration_hours(start, end) >= min_session_hours:
+        genome["session_start_hour"] = start
+        genome["session_end_hour"] = end
+        return
+    new_end = start + min_session_hours
+    genome["session_start_hour"] = start
+    genome["session_end_hour"] = new_end if new_end <= 24 else new_end - 24
 
 
 def _parse_dt(value: str) -> datetime:
